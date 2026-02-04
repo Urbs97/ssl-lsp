@@ -303,7 +303,13 @@ fn procFlagsStr(flags: c_int, buf: []u8) []const u8 {
 }
 
 pub fn main() !void {
-    const allocator = std.heap.page_allocator;
+    // Use debug allocator in debug builds for leak detection and safety checks
+    const is_debug = comptime @import("builtin").mode == .Debug;
+    var gpa = if (is_debug) std.heap.GeneralPurposeAllocator(.{}){} else {};
+    defer if (is_debug) {
+        _ = gpa.deinit();
+    };
+    const allocator = if (is_debug) gpa.allocator() else std.heap.page_allocator;
 
     // Get command line args
     const args = try std.process.argsAlloc(allocator);
@@ -357,6 +363,7 @@ pub fn main() !void {
     std.debug.print("Namespace size: {d} bytes\n", .{ns_size});
 
     var namespace: []u8 = &.{};
+    defer if (namespace.len > 0) allocator.free(namespace);
     if (ns_size > 0) {
         namespace = try allocator.alloc(u8, @intCast(ns_size));
         c.getNamespace(namespace.ptr);
