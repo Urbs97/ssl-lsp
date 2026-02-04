@@ -1,0 +1,11 @@
+variable x;
+
+procedure test begin
+    variable y;
+    y := 1;
+end
+
+procedure start begin
+    x := 1;
+    call test;
+end

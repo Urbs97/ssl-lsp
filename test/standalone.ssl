@@ -1,0 +1,79 @@
+/*
+ * Standalone test SSL script (no external includes)
+ * Note: Local variable names cannot contain underscores (parser limitation)
+ */
+
+#define SCRIPT_NAME     "Test Script"
+#define MAX_ITEMS       100
+#define DEBUG_MODE      1
+
+// Global variables (underscores OK here)
+variable my_global_var;
+variable counter := 42;
+variable message := "Hello";
+
+export variable exported_var;
+
+// Helper procedure (defined before use)
+procedure helper_proc begin
+   variable localvar;
+   localvar := 10;
+
+   if (counter > 0) then begin
+      localvar := localvar + 1;
+   end
+   else begin
+      localvar := 0;
+   end
+
+   while (localvar > 0) do begin
+      localvar := localvar - 1;
+   end
+
+   for (localvar := 0; localvar < 5; localvar := localvar + 1) begin
+      counter := counter + 1;
+   end
+end
+
+// Procedure with arguments
+procedure calculate(variable a, variable b) begin
+   variable result;
+   result := a + b;
+   return result;
+end
+
+// Pure procedure
+pure procedure double_value(variable x) begin
+   return x * 2;
+end
+
+// Inline procedure (cannot use return statement)
+inline procedure add_to_counter(variable n) begin
+   counter := counter + n;
+end
+
+// Procedure with switch
+procedure test_switch(variable val) begin
+   switch (val) begin
+      case 1:
+         counter := 10;
+      case 2:
+         counter := 20;
+      default:
+         counter := 0;
+   end
+end
+
+// Critical section procedure
+procedure critical_update begin
+   startcritical;
+   my_global_var := my_global_var + 1;
+   endcritical;
+end
+
+// Main entry point
+procedure start begin
+   my_global_var := 0;
+   counter := counter + 1;
+   call helper_proc;
+end

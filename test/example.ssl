@@ -1,0 +1,288 @@
+/*
+ * Test SSL Script for LSP Parser Testing
+ * Covers various language features
+ */
+
+#include "headers/define_lite.h"
+#include "headers/sfall.h"
+
+#define SCRIPT_NAME     "Test Script"
+#define NAME            1000
+#define MAX_ITEMS       100
+#define DEBUG_MODE      1
+#define CALC_DAMAGE(x, y)  ((x * y) / 2)
+
+#ifdef DEBUG_MODE
+    #define LOG(msg)    debug_msg(msg)
+#else
+    #define LOG(msg)
+#endif
+
+// Global variables
+variable my_global_var;
+variable another_var := 42;
+variable float_var := 3.14;
+variable string_var := "Hello, Wasteland!";
+
+export variable exported_var;
+import variable imported_var;
+
+// Hook procedure for sfall (must be defined before setup)
+procedure tohit_handler begin
+   variable hitchance;
+   hitchance := get_sfall_arg;
+   if (hitchance > 95) then begin
+      set_sfall_return(95);
+   end
+end
+
+procedure setup begin
+   register_hook_proc(5, tohit_handler);
+   set_global_script_type(1);
+   set_global_script_repeat(40);
+end
+
+// Simple procedure with no arguments
+procedure start begin
+   display_msg("Script started");
+   my_global_var := 0;
+   call setup;
+end
+
+// Procedure with arguments
+procedure calculate_value(variable base, variable multiplier) begin
+   variable result;
+   result := base * multiplier;
+   return result;
+end
+
+// Procedure demonstrating control flow
+procedure test_control_flow begin
+   variable i;
+   variable count := 10;
+
+   // If-then-else
+   if (count > 5) then begin
+      display_msg("Count is greater than 5");
+   end
+   else if (count == 5) then begin
+      display_msg("Count equals 5");
+   end
+   else begin
+      display_msg("Count is less than 5");
+   end
+
+   // While loop
+   i := 0;
+   while (i < count) do begin
+      debug_msg("Iteration: " + i);
+      i := i + 1;
+      if (i == 5) then begin
+         continue;
+      end
+      if (i == 8) then begin
+         break;
+      end
+   end
+
+   // For loop
+   for (i := 0; i < 10; i := i + 1) begin
+      debug_msg("For loop: " + i);
+   end
+
+   // Switch statement
+   switch (count) begin
+      case 1:
+         display_msg("One");
+      case 5:
+         display_msg("Five");
+      case 10:
+         display_msg("Ten");
+      default:
+         display_msg("Other");
+   end
+end
+
+// Procedure using Fallout base functions
+procedure test_fallout_functions begin
+   variable obj;
+   variable tile;
+   variable name;
+
+   obj := dude_obj;
+   tile := tile_num(obj);
+   name := obj_name(obj);
+
+   display_msg("Player: " + name + " at tile: " + tile);
+
+   // Check stats
+   if (get_critter_stat(obj, 0) > 5) then begin
+      give_exp_points(100);
+   end
+
+   // Timer event
+   add_timer_event(self_obj, 100, 1);
+
+   // Random number
+   variable rnd := random(1, 100);
+
+   // Distance check
+   if (tile_distance_objs(obj, target_obj) < 5) then begin
+      float_msg(obj, "Target is close!", 2);
+   end
+end
+
+// Procedure using sfall functions
+procedure test_sfall_functions begin
+   variable arr;
+   variable key;
+   variable value;
+   variable inival;
+
+   // Array operations
+   arr := create_array(10, 0);
+   set_array(arr, 0, "first");
+   set_array(arr, 1, "second");
+   value := get_array(arr, 0);
+   resize_array(arr, 20);
+
+   // Foreach with array
+   foreach (key: value in arr) begin
+      debug_msg("Key: " + key + ", Value: " + value);
+   end
+
+   free_array(arr);
+
+   // INI operations
+   inival := get_ini_setting("ddraw.ini|Main|Mode");
+
+   // Math functions
+   variable x := sqrt(16);
+   variable y := abs(-5);
+   variable z := floor(3.7);
+
+   // String operations
+   variable str := "Hello World";
+   variable slen := strlen(str);
+   variable sub := substr(str, 0, 5);
+
+   // Sfall globals
+   set_sfall_global("my_global", 100);
+   value := get_sfall_global_int("my_global");
+
+   // Graphics
+   if (graphics_funcs_available) then begin
+      variable shader := load_shader("shaders\\test.fx");
+      set_shader_int(shader, "param", 1);
+      activate_shader(shader);
+   end
+end
+
+// Procedure with bitwise operations
+procedure test_operators begin
+   variable a := 5;
+   variable b := 3;
+   variable result;
+
+   // Arithmetic
+   result := a + b;
+   result := a - b;
+   result := a * b;
+   result := a / b;
+   result := a % b;
+
+   // Logical operators (keywords)
+   if (a > 0 and b > 0) then begin
+      display_msg("Both positive");
+   end
+
+   if (a > 10 or b > 10) then begin
+      display_msg("At least one > 10");
+   end
+
+   if (not (a == b)) then begin
+      display_msg("Not equal");
+   end
+
+   // Bitwise operators (infix syntax)
+   result := a bwand b;
+   result := a bwor b;
+   result := a bwxor b;
+   result := bwnot a;
+
+   // Boolean constants
+   variable flag := true;
+   if (flag == false) then begin
+      noop;
+   end
+end
+
+// Pure procedure (no side effects)
+pure procedure get_doubled(variable val) begin
+   return val * 2;
+end
+
+// Inline procedure - just performs an action
+inline procedure log_obj(variable obj) begin
+   debug_msg(obj_name(obj));
+end
+
+// Critical section
+procedure test_critical begin
+   startcritical;
+   variable important := local_var(0);
+   set_local_var(0, important + 1);
+   endcritical;
+end
+
+// Timed procedure
+procedure timed_event begin
+   if (game_time_hour >= 8 and game_time_hour < 20) then begin
+      display_msg("Daytime event triggered");
+   end
+end
+
+// Map script handlers
+procedure map_enter_p_proc begin
+   display_msg("Entered map: " + cur_map_index);
+end
+
+procedure map_exit_p_proc begin
+   display_msg("Exiting map");
+end
+
+procedure map_update_p_proc begin
+   // Called each game tick
+   if (combat_is_initialized) then begin
+      script_overrides;
+   end
+end
+
+// Dialog helper procedures (must be defined before dialog_main)
+procedure dialog_option1 begin
+   display_msg("Option 1 selected");
+end
+
+procedure dialog_option2 begin
+   display_msg("Option 2 selected");
+end
+
+procedure dialog_smart begin
+   display_msg("Smart option selected");
+end
+
+procedure dialog_main begin
+   gsay_reply(NAME, 100);
+   gsay_option(NAME, 101, dialog_option1, 4);
+   gsay_option(NAME, 102, dialog_option2, 4);
+   giq_option(4, NAME, 103, dialog_smart, 4);
+end
+
+// Dialog procedure (calls dialog_main which must be defined above)
+procedure talk_p_proc begin
+   start_gdialog(NAME, self_obj, 4, -1, -1);
+   gsay_start;
+   call dialog_main;
+   gsay_end;
+   end_dialogue;
+end

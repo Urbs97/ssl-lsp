@@ -1,0 +1,8 @@
+// Minimal test script for basic parser testing
+
+variable count := 0;
+
+procedure start begin
+    count := 1;
+    display_msg("Hello");
+end
