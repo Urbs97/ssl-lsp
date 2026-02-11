@@ -40,6 +40,11 @@ pub const DocumentSymbol = struct {
     children: ?[]const DocumentSymbol = null,
 };
 
+pub const Location = struct {
+    uri: []const u8,
+    range: Range,
+};
+
 /// Serialize an LSP Position to a json Value
 fn positionToJson(allocator: std.mem.Allocator, pos: Position) !std.json.Value {
     var obj = std.json.ObjectMap.init(allocator);
@@ -53,6 +58,14 @@ pub fn rangeToJson(allocator: std.mem.Allocator, range: Range) !std.json.Value {
     var obj = std.json.ObjectMap.init(allocator);
     try obj.put("start", try positionToJson(allocator, range.start));
     try obj.put("end", try positionToJson(allocator, range.end));
+    return .{ .object = obj };
+}
+
+/// Serialize an LSP Location to a json Value
+pub fn locationToJson(allocator: std.mem.Allocator, loc: Location) !std.json.Value {
+    var obj = std.json.ObjectMap.init(allocator);
+    try obj.put("uri", .{ .string = loc.uri });
+    try obj.put("range", try rangeToJson(allocator, loc.range));
     return .{ .object = obj };
 }
 
