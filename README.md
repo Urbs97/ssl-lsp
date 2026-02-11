@@ -8,9 +8,10 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
 - **LSP Server** - Language Server Protocol support over stdio for editor integration
   - Real-time diagnostics (syntax errors as you type)
   - Document symbols (procedure/variable outline)
+  - Go to definition (user-defined procedures and variables)
 
 ### Planned
-- Go to definition
+- Go to definition for built-in opcodes
 - Find references
 - Hover information
 - Completion and signature help for built-in opcodes

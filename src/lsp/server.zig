@@ -142,6 +142,10 @@ const Server = struct {
             if (id) |req_id| {
                 try self.handleDocumentSymbol(allocator, req_id, params);
             }
+        } else if (std.mem.eql(u8, method, "textDocument/definition")) {
+            if (id) |req_id| {
+                try self.handleDefinition(allocator, req_id, params);
+            }
         } else {
             // Unknown method - send MethodNotFound for requests (those with id)
             if (id) |req_id| {
@@ -154,6 +158,7 @@ const Server = struct {
         var capabilities = std.json.ObjectMap.init(allocator);
         try capabilities.put("textDocumentSync", .{ .integer = 1 });
         try capabilities.put("documentSymbolProvider", .{ .bool = true });
+        try capabilities.put("definitionProvider", .{ .bool = true });
 
         var result = std.json.ObjectMap.init(allocator);
         try result.put("capabilities", .{ .object = capabilities });
@@ -428,6 +433,110 @@ const Server = struct {
 
         try self.sendResponse(allocator, id, .{ .array = symbols });
     }
+
+    fn handleDefinition(self: *Server, allocator: std.mem.Allocator, id: std.json.Value, params: std.json.Value) !void {
+        const td = getObject(params, "textDocument") orelse {
+            log.err("definition: missing 'textDocument'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const uri = getString(td, "uri") orelse {
+            log.err("definition: missing 'uri'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const position = getObject(params, "position") orelse {
+            log.err("definition: missing 'position'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const line = getInteger(position, "line") orelse {
+            log.err("definition: missing 'position.line'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const character = getInteger(position, "character") orelse {
+            log.err("definition: missing 'position.character'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        const doc = self.documents.getPtr(uri) orelse {
+            log.debug("definition: unknown document {s}", .{uri});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        var pr = doc.parse_result orelse {
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        const word = getWordAtPosition(doc.text, @intCast(line), @intCast(character)) orelse {
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        // Search procedures
+        for (0..pr.num_procs) |i| {
+            const proc = pr.getProc(i);
+            if (std.mem.eql(u8, proc.name, word)) {
+                const decl_line: u32 = if (proc.declared_line > 0) proc.declared_line - 1 else 0;
+                const name_len: u32 = @intCast(proc.name.len);
+                const loc = types.Location{
+                    .uri = uri,
+                    .range = .{
+                        .start = .{ .line = decl_line, .character = 0 },
+                        .end = .{ .line = decl_line, .character = name_len },
+                    },
+                };
+                try self.sendResponse(allocator, id, try types.locationToJson(allocator, loc));
+                return;
+            }
+        }
+
+        // Search global variables
+        for (0..pr.num_vars) |i| {
+            const v = pr.getVar(i);
+            if (std.mem.eql(u8, v.name, word)) {
+                const var_line: u32 = if (v.declared_line > 0) v.declared_line - 1 else 0;
+                const name_len: u32 = @intCast(v.name.len);
+                const loc = types.Location{
+                    .uri = uri,
+                    .range = .{
+                        .start = .{ .line = var_line, .character = 0 },
+                        .end = .{ .line = var_line, .character = name_len },
+                    },
+                };
+                try self.sendResponse(allocator, id, try types.locationToJson(allocator, loc));
+                return;
+            }
+        }
+
+        // Search local variables in each procedure
+        for (0..pr.num_procs) |pi| {
+            const proc = pr.getProc(pi);
+            for (0..proc.num_local_vars) |vi| {
+                const local_var = pr.getProcVar(pi, vi);
+                if (std.mem.eql(u8, local_var.name, word)) {
+                    const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
+                    const name_len: u32 = @intCast(local_var.name.len);
+                    const loc = types.Location{
+                        .uri = uri,
+                        .range = .{
+                            .start = .{ .line = var_line, .character = 0 },
+                            .end = .{ .line = var_line, .character = name_len },
+                        },
+                    };
+                    try self.sendResponse(allocator, id, try types.locationToJson(allocator, loc));
+                    return;
+                }
+            }
+        }
+
+        // No match found
+        try self.sendResponse(allocator, id, .null);
+    }
 };
 
 // JSON helper functions
@@ -450,6 +559,17 @@ fn getString(val: std.json.Value, key: []const u8) ?[]const u8 {
     };
 }
 
+fn getInteger(val: std.json.Value, key: []const u8) ?i64 {
+    const v = switch (val) {
+        .object => |obj| obj.get(key) orelse return null,
+        else => return null,
+    };
+    return switch (v) {
+        .integer => |n| n,
+        else => null,
+    };
+}
+
 fn getArray(val: std.json.Value, key: []const u8) ?[]std.json.Value {
     const v = switch (val) {
         .object => |obj| obj.get(key) orelse return null,
@@ -459,6 +579,58 @@ fn getArray(val: std.json.Value, key: []const u8) ?[]std.json.Value {
         .array => |a| a.items,
         else => null,
     };
+}
+
+/// Extract the identifier word at a given (line, character) position in text.
+fn getWordAtPosition(text: []const u8, line: u32, character: u32) ?[]const u8 {
+    // Find the target line
+    var current_line: u32 = 0;
+    var line_start: usize = 0;
+    for (text, 0..) |ch, idx| {
+        if (current_line == line) {
+            line_start = idx;
+            break;
+        }
+        if (ch == '\n') {
+            current_line += 1;
+        }
+    } else {
+        // If we exhausted text without finding the line (unless it's the last line)
+        if (current_line != line) return null;
+        line_start = text.len;
+    }
+
+    // Find line end
+    var line_end: usize = line_start;
+    while (line_end < text.len and text[line_end] != '\n') {
+        line_end += 1;
+    }
+
+    const line_text = text[line_start..line_end];
+    if (character >= line_text.len) return null;
+
+    const char_idx = @as(usize, character);
+
+    // Check that cursor is on an identifier character
+    if (!isIdentChar(line_text[char_idx])) return null;
+
+    // Scan left
+    var start = char_idx;
+    while (start > 0 and isIdentChar(line_text[start - 1])) {
+        start -= 1;
+    }
+
+    // Scan right
+    var end = char_idx + 1;
+    while (end < line_text.len and isIdentChar(line_text[end])) {
+        end += 1;
+    }
+
+    return line_text[start..end];
+}
+
+fn isIdentChar(ch: u8) bool {
+    return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
 
 /// Entry point for LSP mode

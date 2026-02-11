@@ -317,6 +317,95 @@ def test_document_symbols_empty():
     print("PASS: test_document_symbols_empty")
 
 
+def test_goto_definition_procedure():
+    """Go-to-definition on a procedure call jumps to its declaration."""
+    # simple.ssl:
+    # line 0: variable x;
+    # line 2: procedure test begin
+    # line 7: procedure start begin
+    # line 9:     call test;
+    ssl_text = open(os.path.join(os.path.dirname(__file__), "simple.ssl")).read()
+    uri = "file:///tmp/test_goto_def.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "test" in "call test;" at line 9, character 9
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 20,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 9, "character": 9},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 20]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location, got null"
+    assert result["uri"] == uri
+    # procedure test is declared at line 2 (0-indexed)
+    assert result["range"]["start"]["line"] == 2, f"Expected line 2, got: {result['range']['start']['line']}"
+
+    print("PASS: test_goto_definition_procedure")
+
+
+def test_goto_definition_variable():
+    """Go-to-definition on a variable jumps to its declaration."""
+    ssl_text = open(os.path.join(os.path.dirname(__file__), "simple.ssl")).read()
+    uri = "file:///tmp/test_goto_def_var.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "x" in "x := 1;" at line 8, character 4
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 21,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 8, "character": 4},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 21]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location, got null"
+    assert result["uri"] == uri
+    # variable x is declared at line 0 (0-indexed)
+    assert result["range"]["start"]["line"] == 0, f"Expected line 0, got: {result['range']['start']['line']}"
+
+    print("PASS: test_goto_definition_variable")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -327,6 +416,8 @@ if __name__ == "__main__":
         test_unknown_method,
         test_document_symbols,
         test_document_symbols_empty,
+        test_goto_definition_procedure,
+        test_goto_definition_variable,
     ]
 
     passed = 0
