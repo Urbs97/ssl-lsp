@@ -6,8 +6,20 @@ const parser = @import("../parsing/parser.zig");
 
 const log = std.log.scoped(.server);
 
-/// Stored document content keyed by URI
-const DocumentMap = std.StringHashMapUnmanaged([]const u8);
+/// Stored document with content and cached parse result
+const Document = struct {
+    allocator: std.mem.Allocator,
+    text: []const u8,
+    parse_result: ?parser.ParseResult = null,
+
+    fn deinit(self: *Document) void {
+        self.allocator.free(self.text);
+        if (self.parse_result) |*pr| pr.deinit();
+    }
+};
+
+/// Stored documents keyed by URI
+const DocumentMap = std.StringHashMapUnmanaged(Document);
 
 /// Main LSP server state
 const Server = struct {
@@ -31,7 +43,7 @@ const Server = struct {
         var it = self.documents.iterator();
         while (it.next()) |entry| {
             self.allocator.free(entry.key_ptr.*);
-            self.allocator.free(entry.value_ptr.*);
+            entry.value_ptr.deinit();
         }
         self.documents.deinit(self.allocator);
     }
@@ -126,6 +138,10 @@ const Server = struct {
             try self.handleDidChange(allocator, params);
         } else if (std.mem.eql(u8, method, "textDocument/didClose")) {
             try self.handleDidClose(allocator, params);
+        } else if (std.mem.eql(u8, method, "textDocument/documentSymbol")) {
+            if (id) |req_id| {
+                try self.handleDocumentSymbol(allocator, req_id, params);
+            }
         } else {
             // Unknown method - send MethodNotFound for requests (those with id)
             if (id) |req_id| {
@@ -137,6 +153,7 @@ const Server = struct {
     fn handleInitialize(self: *Server, allocator: std.mem.Allocator, id: std.json.Value) !void {
         var capabilities = std.json.ObjectMap.init(allocator);
         try capabilities.put("textDocumentSync", .{ .integer = 1 });
+        try capabilities.put("documentSymbolProvider", .{ .bool = true });
 
         var result = std.json.ObjectMap.init(allocator);
         try result.put("capabilities", .{ .object = capabilities });
@@ -170,10 +187,10 @@ const Server = struct {
         const result = try self.documents.getOrPut(self.allocator, uri_dupe);
         if (result.found_existing) {
             self.allocator.free(result.key_ptr.*);
-            self.allocator.free(result.value_ptr.*);
+            result.value_ptr.deinit();
             result.key_ptr.* = uri_dupe;
         }
-        result.value_ptr.* = text_dupe;
+        result.value_ptr.* = .{ .allocator = self.allocator, .text = text_dupe };
 
         log.info("opened: {s}", .{uri});
         try self.publishDiagnostics(allocator, uri, text);
@@ -197,9 +214,11 @@ const Server = struct {
         if (changes.len == 0) return;
         const text = getString(changes[0], "text") orelse return;
 
-        if (self.documents.getPtr(uri)) |val_ptr| {
-            self.allocator.free(val_ptr.*);
-            val_ptr.* = try self.allocator.dupe(u8, text);
+        if (self.documents.getPtr(uri)) |doc| {
+            doc.allocator.free(doc.text);
+            if (doc.parse_result) |*pr| pr.deinit();
+            doc.text = try doc.allocator.dupe(u8, text);
+            doc.parse_result = null;
         }
 
         try self.publishDiagnostics(allocator, uri, text);
@@ -217,7 +236,8 @@ const Server = struct {
 
         if (self.documents.fetchRemove(uri)) |entry| {
             self.allocator.free(entry.key);
-            self.allocator.free(entry.value);
+            var doc = entry.value;
+            doc.deinit();
         }
 
         // Clear diagnostics for closed file
@@ -247,12 +267,20 @@ const Server = struct {
         const file_path = if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
 
-        // Run the parser
-        var parse_result = parser.parse(allocator, tmp_path, tmp_path, include_dir) catch |err| blk: {
+        // Run the parser using self.allocator so ParseResult outlives the arena
+        var parse_result = parser.parse(self.allocator, tmp_path, tmp_path, include_dir) catch |err| blk: {
             log.debug("parser failed: {}", .{err});
             break :blk null;
         };
-        if (parse_result) |*pr| pr.deinit();
+
+        // Cache the parse result in the document
+        if (self.documents.getPtr(uri)) |doc| {
+            if (doc.parse_result) |*old| old.deinit();
+            doc.parse_result = parse_result;
+        } else {
+            // Document not in map (e.g. didClose clearing diagnostics) — clean up
+            if (parse_result) |*pr| pr.deinit();
+        }
 
         const error_list = try errors.readErrors(allocator);
         defer error_list.deinit();
@@ -292,6 +320,113 @@ const Server = struct {
         try params_obj.put("diagnostics", .{ .array = diag_array });
 
         try self.sendNotification(allocator, "textDocument/publishDiagnostics", .{ .object = params_obj });
+    }
+
+    fn handleDocumentSymbol(self: *Server, allocator: std.mem.Allocator, id: std.json.Value, params: std.json.Value) !void {
+        const td = getObject(params, "textDocument") orelse {
+            log.err("documentSymbol: missing 'textDocument'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+        const uri = getString(td, "uri") orelse {
+            log.err("documentSymbol: missing 'uri'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        const doc = self.documents.getPtr(uri) orelse {
+            log.debug("documentSymbol: unknown document {s}", .{uri});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        var pr = doc.parse_result orelse {
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        var symbols = std.json.Array.init(allocator);
+
+        // Build procedure symbols
+        for (0..pr.num_procs) |i| {
+            const proc = pr.getProc(i);
+
+            // Skip undefined (forward-declared only) procs
+            if (!proc.defined) continue;
+
+            const start_line = if (proc.start_line) |l| if (l > 0) l - 1 else 0 else 0;
+            const end_line = if (proc.end_line) |l| if (l > 0) l - 1 else 0 else start_line;
+
+            const range = types.Range{
+                .start = .{ .line = start_line, .character = 0 },
+                .end = .{ .line = end_line, .character = 0 },
+            };
+
+            // declared_line for selection range (the "procedure" keyword line)
+            const decl_line: u32 = if (proc.declared_line > 0) proc.declared_line - 1 else 0;
+            const selection_range = types.Range{
+                .start = .{ .line = decl_line, .character = 0 },
+                .end = .{ .line = decl_line, .character = 0 },
+            };
+
+            // Format flags as detail string
+            var flags_buf: [128]u8 = undefined;
+            const flags_str = proc.flags.format(&flags_buf);
+            const detail: ?[]const u8 = if (!std.mem.eql(u8, flags_str, "(none)")) flags_str else null;
+
+            // Build children: local variables of this procedure
+            var children: ?[]const types.DocumentSymbol = null;
+            if (proc.num_local_vars > 0) {
+                var child_list = try std.ArrayListUnmanaged(types.DocumentSymbol).initCapacity(allocator, proc.num_local_vars);
+                for (0..proc.num_local_vars) |vi| {
+                    const local_var = pr.getProcVar(i, vi);
+                    const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
+                    const var_range = types.Range{
+                        .start = .{ .line = var_line, .character = 0 },
+                        .end = .{ .line = var_line, .character = 0 },
+                    };
+                    child_list.appendAssumeCapacity(.{
+                        .name = local_var.name,
+                        .detail = local_var.var_type.name(),
+                        .kind = .Variable,
+                        .range = var_range,
+                        .selection_range = var_range,
+                    });
+                }
+                children = child_list.items;
+            }
+
+            const sym = types.DocumentSymbol{
+                .name = proc.name,
+                .detail = detail,
+                .kind = .Function,
+                .range = range,
+                .selection_range = selection_range,
+                .children = children,
+            };
+            try symbols.append(try types.documentSymbolToJson(allocator, sym));
+        }
+
+        // Build global variable symbols
+        for (0..pr.num_vars) |i| {
+            const v = pr.getVar(i);
+            const var_line: u32 = if (v.declared_line > 0) v.declared_line - 1 else 0;
+            const var_range = types.Range{
+                .start = .{ .line = var_line, .character = 0 },
+                .end = .{ .line = var_line, .character = 0 },
+            };
+
+            const sym = types.DocumentSymbol{
+                .name = v.name,
+                .detail = v.var_type.name(),
+                .kind = .Variable,
+                .range = var_range,
+                .selection_range = var_range,
+            };
+            try symbols.append(try types.documentSymbolToJson(allocator, sym));
+        }
+
+        try self.sendResponse(allocator, id, .{ .array = symbols });
     }
 };
 
