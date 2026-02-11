@@ -1,7 +1,24 @@
 const std = @import("std");
 
+const sslc_sources: []const []const u8 = &.{
+    "compile.c",
+    "parse.c",
+    "parselib.c",
+    "extra.c",
+    "gencode.c",
+    "lex.c",
+    "parseext.c",
+    "mcpp_main.c",
+    "mcpp_directive.c",
+    "mcpp_eval.c",
+    "mcpp_expand.c",
+    "mcpp_support.c",
+    "mcpp_system.c",
+    "optimize.c",
+    "compat.c",
+};
+
 pub fn build(b: *std.Build) void {
-    // Default to x86-linux-gnu to match 32-bit libparser.so built with glibc
     const target = b.standardTargetOptions(.{
         .default_target = .{
             .cpu_arch = .x86,
@@ -10,6 +27,23 @@ pub fn build(b: *std.Build) void {
         },
     });
     const optimize = b.standardOptimizeOption(.{});
+
+    // Build libparser as a static C library from the sslc submodule
+    const libparser = b.addLibrary(.{
+        .linkage = .static,
+        .name = "parser",
+        .root_module = b.createModule(.{
+            .target = target,
+            .optimize = optimize,
+            .link_libc = true,
+        }),
+    });
+    libparser.addCSourceFiles(.{
+        .root = b.path("sslc"),
+        .files = sslc_sources,
+        .flags = &.{"-DBUILDING_DLL"},
+    });
+    libparser.addIncludePath(b.path("sslc"));
 
     const exe = b.addExecutable(.{
         .name = "ssl-lsp",
@@ -20,10 +54,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.addIncludePath(b.path("lib"));
-    exe.addLibraryPath(b.path("bin"));
-    exe.addRPath(b.path("bin"));
-    exe.linkSystemLibrary("parser");
+    exe.addIncludePath(b.path("sslc"));
+    exe.linkLibrary(libparser);
     exe.linkLibC();
 
     b.installArtifact(exe);
@@ -44,10 +76,8 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
         }),
     });
-    exe_tests.addIncludePath(b.path("lib"));
-    exe_tests.addLibraryPath(b.path("bin"));
-    exe_tests.addRPath(b.path("bin"));
-    exe_tests.linkSystemLibrary("parser");
+    exe_tests.addIncludePath(b.path("sslc"));
+    exe_tests.linkLibrary(libparser);
     exe_tests.linkLibC();
 
     const test_step = b.step("test", "Run unit tests");

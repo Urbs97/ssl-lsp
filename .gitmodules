@@ -1,0 +1,4 @@
+[submodule "sslc"]
+	path = sslc
+	url = https://github.com/Urbs97/sslc.git
+	branch = feature/linux-lib
