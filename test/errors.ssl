@@ -1,0 +1,15 @@
+// Test script with intentional errors for linter testing
+
+variable count := 0;
+
+procedure start begin
+    // Reference an undefined variable
+    x := 5;
+
+    // Call an undefined procedure
+    call nonexistent_proc;
+
+    // Syntax error - mismatched begin/end
+    if (count) then begin
+        display_msg("hello");
+end

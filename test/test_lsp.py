@@ -1,0 +1,240 @@
+#!/usr/bin/env python3
+"""Integration tests for the ssl-lsp LSP server."""
+
+import json
+import subprocess
+import sys
+import os
+
+LSP_BIN = os.path.join(os.path.dirname(__file__), "..", "zig-out", "bin", "ssl-lsp")
+
+
+def make_msg(obj):
+    """Encode a JSON-RPC message with Content-Length header."""
+    body = json.dumps(obj)
+    return f"Content-Length: {len(body)}\r\n\r\n{body}".encode()
+
+
+def parse_responses(raw_stdout):
+    """Parse raw LSP stdout into a list of JSON objects."""
+    messages = []
+    data = raw_stdout.decode()
+    while data:
+        if not data.startswith("Content-Length: "):
+            break
+        header_end = data.index("\r\n\r\n")
+        length = int(data[len("Content-Length: "):header_end])
+        body_start = header_end + 4
+        body = data[body_start:body_start + length]
+        messages.append(json.loads(body))
+        data = data[body_start + length:]
+    return messages
+
+
+def run_lsp(*messages):
+    """Send a sequence of JSON-RPC messages and return parsed responses."""
+    stdin_data = b"".join(make_msg(m) for m in messages)
+    result = subprocess.run(
+        [LSP_BIN, "--stdio"],
+        input=stdin_data,
+        capture_output=True,
+        timeout=10,
+    )
+    return parse_responses(result.stdout), result.stderr.decode(), result.returncode
+
+
+def init_messages():
+    """Return the standard initialize + initialized handshake messages."""
+    return [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"capabilities": {}}},
+        {"jsonrpc": "2.0", "method": "initialized", "params": {}},
+    ]
+
+
+def shutdown_messages(next_id=100):
+    """Return shutdown + exit messages."""
+    return [
+        {"jsonrpc": "2.0", "id": next_id, "method": "shutdown", "params": {}},
+        {"jsonrpc": "2.0", "method": "exit"},
+    ]
+
+
+def test_initialize():
+    """Server responds to initialize with capabilities."""
+    responses, stderr, code = run_lsp(*init_messages(), *shutdown_messages())
+
+    init_response = responses[0]
+    assert init_response["id"] == 1
+    assert "result" in init_response
+
+    caps = init_response["result"]["capabilities"]
+    assert caps["textDocumentSync"] == 1
+
+    info = init_response["result"]["serverInfo"]
+    assert info["name"] == "ssl-lsp"
+
+    print("PASS: test_initialize")
+
+
+def test_diagnostics_on_bad_ssl():
+    """Opening a file with invalid SSL produces error diagnostics."""
+    bad_ssl = "this is not valid ssl code at all;\n"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///tmp/test_bad.ssl",
+                "languageId": "ssl",
+                "version": 1,
+                "text": bad_ssl,
+            }
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, *shutdown_messages())
+
+    # Find the publishDiagnostics notification
+    diag_msgs = [r for r in responses if r.get("method") == "textDocument/publishDiagnostics"]
+    assert len(diag_msgs) >= 1, f"Expected diagnostics, got: {responses}"
+
+    diags = diag_msgs[0]["params"]["diagnostics"]
+    assert len(diags) > 0, "Expected at least one diagnostic for invalid SSL"
+
+    # Should have at least one error-level diagnostic (severity 1)
+    errors = [d for d in diags if d["severity"] == 1]
+    assert len(errors) > 0, f"Expected error diagnostics, got: {diags}"
+
+    # Verify diagnostic structure
+    for d in diags:
+        assert "range" in d
+        assert "start" in d["range"]
+        assert "end" in d["range"]
+        assert "line" in d["range"]["start"]
+        assert "character" in d["range"]["start"]
+        assert "message" in d
+        assert d["source"] == "ssl-lsp"
+
+    print(f"PASS: test_diagnostics_on_bad_ssl ({len(diags)} diagnostic(s))")
+    for d in diags:
+        sev = {1: "ERROR", 2: "WARN", 3: "INFO", 4: "HINT"}.get(d["severity"], "?")
+        line = d["range"]["start"]["line"]
+        col = d["range"]["start"]["character"]
+        print(f"  [{sev}] {line}:{col}: {d['message'].strip()}")
+
+
+def test_diagnostics_on_valid_ssl():
+    """Opening a valid SSL file produces empty diagnostics."""
+    valid_ssl = "variable count := 0;\n\nprocedure start begin\n    count := 1;\nend\n"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///tmp/test_good.ssl",
+                "languageId": "ssl",
+                "version": 1,
+                "text": valid_ssl,
+            }
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, *shutdown_messages())
+
+    diag_msgs = [r for r in responses if r.get("method") == "textDocument/publishDiagnostics"]
+    assert len(diag_msgs) >= 1, f"Expected diagnostics notification, got: {responses}"
+
+    diags = diag_msgs[0]["params"]["diagnostics"]
+    errors = [d for d in diags if d["severity"] == 1]
+    assert len(errors) == 0, f"Expected no errors for valid SSL, got: {errors}"
+
+    print(f"PASS: test_diagnostics_on_valid_ssl ({len(diags)} diagnostic(s))")
+
+
+def test_did_change_updates_diagnostics():
+    """Changing document content re-publishes diagnostics."""
+    valid_ssl = "variable x := 0;\n\nprocedure start begin\n    x := 1;\nend\n"
+    bad_ssl = "this is broken\n"
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///tmp/test_change.ssl",
+                "languageId": "ssl",
+                "version": 1,
+                "text": valid_ssl,
+            }
+        },
+    }
+
+    did_change = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didChange",
+        "params": {
+            "textDocument": {"uri": "file:///tmp/test_change.ssl", "version": 2},
+            "contentChanges": [{"text": bad_ssl}],
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, did_change, *shutdown_messages())
+
+    diag_msgs = [r for r in responses if r.get("method") == "textDocument/publishDiagnostics"]
+    assert len(diag_msgs) >= 2, f"Expected 2 diagnostics notifications (open + change), got {len(diag_msgs)}"
+
+    # Second diagnostics should have errors (from the bad change)
+    second_diags = diag_msgs[1]["params"]["diagnostics"]
+    errors = [d for d in second_diags if d["severity"] == 1]
+    assert len(errors) > 0, f"Expected errors after bad change, got: {second_diags}"
+
+    print(f"PASS: test_did_change_updates_diagnostics ({len(second_diags)} diagnostic(s) after change)")
+
+
+def test_shutdown_response():
+    """Shutdown returns null result."""
+    responses, stderr, code = run_lsp(*init_messages(), *shutdown_messages(next_id=42))
+
+    shutdown_resp = [r for r in responses if r.get("id") == 42]
+    assert len(shutdown_resp) == 1, f"Expected shutdown response, got: {responses}"
+    assert shutdown_resp[0]["result"] is None
+
+    print("PASS: test_shutdown_response")
+
+
+def test_unknown_method():
+    """Unknown methods get MethodNotFound error."""
+    unknown = {"jsonrpc": "2.0", "id": 99, "method": "custom/nonexistent", "params": {}}
+
+    responses, stderr, code = run_lsp(*init_messages(), unknown, *shutdown_messages())
+
+    err_resp = [r for r in responses if r.get("id") == 99]
+    assert len(err_resp) == 1, f"Expected error response for unknown method, got: {responses}"
+    assert "error" in err_resp[0]
+    assert err_resp[0]["error"]["code"] == -32601
+
+    print("PASS: test_unknown_method")
+
+
+if __name__ == "__main__":
+    tests = [
+        test_initialize,
+        test_diagnostics_on_bad_ssl,
+        test_diagnostics_on_valid_ssl,
+        test_did_change_updates_diagnostics,
+        test_shutdown_response,
+        test_unknown_method,
+    ]
+
+    passed = 0
+    failed = 0
+    for test in tests:
+        try:
+            test()
+            passed += 1
+        except Exception as e:
+            print(f"FAIL: {test.__name__}: {e}")
+            failed += 1
+
+    print(f"\n{passed}/{passed + failed} tests passed")
+    sys.exit(1 if failed > 0 else 0)

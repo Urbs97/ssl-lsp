@@ -137,18 +137,45 @@ fn parseInteger(line: []const u8, pos: *usize) ?i32 {
     return if (negative) -value else value;
 }
 
+pub const ErrorList = struct {
+    errors: []ParseError,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: ErrorList) void {
+        for (self.errors) |err| {
+            self.allocator.free(err.file_name);
+            self.allocator.free(err.message);
+        }
+        self.allocator.free(self.errors);
+    }
+
+    pub fn displayErrors(self: ErrorList, writer: *std.io.Writer) void {
+        writeErrors(self.errors, writer);
+    }
+
+    pub fn countErrors(self: ErrorList) usize {
+        var count: usize = 0;
+        for (self.errors) |err| {
+            if (err.error_type == .@"error") count += 1;
+        }
+        return count;
+    }
+};
+
 /// Read and parse errors.txt file
-pub fn readErrors(allocator: std.mem.Allocator) ![]ParseError {
+pub fn readErrors(allocator: std.mem.Allocator) !ErrorList {
     const file = std.fs.cwd().openFile("errors.txt", .{}) catch |err| {
-        if (err == error.FileNotFound) return &.{};
+        if (err == error.FileNotFound) return .{ .errors = &.{}, .allocator = allocator };
         return err;
     };
     defer file.close();
 
-    const content = try file.readToEndAlloc(allocator, 1024 * 1024);
+    var buf: [4096]u8 = undefined;
+    var rdr = file.reader(&buf);
+    const content = try rdr.interface.allocRemaining(allocator, .unlimited);
     defer allocator.free(content);
 
-    var errors: std.ArrayListUnmanaged(ParseError) = .empty;
+    var error_list: std.ArrayListUnmanaged(ParseError) = .empty;
 
     var lines = std.mem.splitScalar(u8, content, '\n');
     while (lines.next()) |line| {
@@ -157,7 +184,7 @@ pub fn readErrors(allocator: std.mem.Allocator) ![]ParseError {
             // Duplicate strings since content will be freed
             const file_name = try allocator.dupe(u8, parsed.file_name);
             const message = try allocator.dupe(u8, parsed.message);
-            try errors.append(allocator, .{
+            try error_list.append(allocator, .{
                 .error_type = parsed.error_type,
                 .file_name = file_name,
                 .line = parsed.line,
@@ -167,21 +194,21 @@ pub fn readErrors(allocator: std.mem.Allocator) ![]ParseError {
         }
     }
 
-    return errors.toOwnedSlice(allocator);
+    return .{ .errors = try error_list.toOwnedSlice(allocator), .allocator = allocator };
 }
 
-/// Display parsed errors
-pub fn displayErrors(errors: []const ParseError) void {
-    if (errors.len == 0) return;
+/// Write parsed errors to the given writer
+fn writeErrors(errs: []const ParseError, writer: *std.io.Writer) void {
+    if (errs.len == 0) return;
 
-    std.debug.print("\nParser Messages: {d}\n", .{errors.len});
-    std.debug.print("{s}\n", .{"-" ** 40});
+    writer.print("Parser Messages: {d}\n", .{errs.len}) catch return;
+    writer.print("{s}\n", .{"-" ** 40}) catch return;
 
     var error_count: usize = 0;
     var warning_count: usize = 0;
     var message_count: usize = 0;
 
-    for (errors) |err| {
+    for (errs) |err| {
         const type_str: []const u8 = switch (err.error_type) {
             .@"error" => blk: {
                 error_count += 1;
@@ -199,37 +226,28 @@ pub fn displayErrors(errors: []const ParseError) void {
         };
 
         if (err.column) |col| {
-            std.debug.print("  [{s}] {s}:{d}:{d}: {s}\n", .{
+            writer.print("  [{s}] {s}:{d}:{d}: {s}\n", .{
                 type_str,
                 err.file_name,
                 err.line,
                 col,
                 err.message,
-            });
+            }) catch return;
         } else {
-            std.debug.print("  [{s}] {s}:{d}: {s}\n", .{
+            writer.print("  [{s}] {s}:{d}: {s}\n", .{
                 type_str,
                 err.file_name,
                 err.line,
                 err.message,
-            });
+            }) catch return;
         }
     }
 
-    std.debug.print("\nSummary: {d} error(s), {d} warning(s), {d} message(s)\n", .{
+    writer.print("Summary: {d} error(s), {d} warning(s), {d} message(s)\n", .{
         error_count,
         warning_count,
         message_count,
-    });
-}
-
-/// Free errors allocated by readErrors
-pub fn freeErrors(allocator: std.mem.Allocator, errors: []ParseError) void {
-    for (errors) |err| {
-        allocator.free(err.file_name);
-        allocator.free(err.message);
-    }
-    allocator.free(errors);
+    }) catch return;
 }
 
 // Tests
