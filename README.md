@@ -7,10 +7,9 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
 - **Linting** - Parse SSL scripts and report syntax errors, warnings, and diagnostics
 - **LSP Server** - Language Server Protocol support over stdio for editor integration
   - Real-time diagnostics (syntax errors as you type)
+  - Document symbols (procedure/variable outline)
 
 ### Planned
-
-- Document symbols (procedure/variable outline)
 - Go to definition
 - Find references
 - Hover information

@@ -26,32 +26,67 @@ pub const Diagnostic = struct {
     source: []const u8 = "ssl-lsp",
 };
 
+pub const SymbolKind = enum(u8) {
+    Function = 12,
+    Variable = 13,
+};
+
+pub const DocumentSymbol = struct {
+    name: []const u8,
+    detail: ?[]const u8 = null,
+    kind: SymbolKind,
+    range: Range,
+    selection_range: Range,
+    children: ?[]const DocumentSymbol = null,
+};
+
+/// Serialize an LSP Position to a json Value
+fn positionToJson(allocator: std.mem.Allocator, pos: Position) !std.json.Value {
+    var obj = std.json.ObjectMap.init(allocator);
+    try obj.put("line", .{ .integer = @intCast(pos.line) });
+    try obj.put("character", .{ .integer = @intCast(pos.character) });
+    return .{ .object = obj };
+}
+
+/// Serialize an LSP Range to a json Value
+pub fn rangeToJson(allocator: std.mem.Allocator, range: Range) !std.json.Value {
+    var obj = std.json.ObjectMap.init(allocator);
+    try obj.put("start", try positionToJson(allocator, range.start));
+    try obj.put("end", try positionToJson(allocator, range.end));
+    return .{ .object = obj };
+}
+
 /// Serialize a Diagnostic to a json Value
 pub fn diagnosticToJson(allocator: std.mem.Allocator, diag: Diagnostic) !std.json.Value {
     var obj = std.json.ObjectMap.init(allocator);
 
-    // range
-    var range_obj = std.json.ObjectMap.init(allocator);
-    var start_obj = std.json.ObjectMap.init(allocator);
-    try start_obj.put("line", .{ .integer = @intCast(diag.range.start.line) });
-    try start_obj.put("character", .{ .integer = @intCast(diag.range.start.character) });
-    try range_obj.put("start", .{ .object = start_obj });
-
-    var end_obj = std.json.ObjectMap.init(allocator);
-    try end_obj.put("line", .{ .integer = @intCast(diag.range.end.line) });
-    try end_obj.put("character", .{ .integer = @intCast(diag.range.end.character) });
-    try range_obj.put("end", .{ .object = end_obj });
-
-    try obj.put("range", .{ .object = range_obj });
-
-    // severity
+    try obj.put("range", try rangeToJson(allocator, diag.range));
     try obj.put("severity", .{ .integer = @intFromEnum(diag.severity) });
-
-    // source
     try obj.put("source", .{ .string = diag.source });
-
-    // message
     try obj.put("message", .{ .string = diag.message });
+
+    return .{ .object = obj };
+}
+
+/// Serialize a DocumentSymbol to a json Value (recursive for children)
+pub fn documentSymbolToJson(allocator: std.mem.Allocator, sym: DocumentSymbol) !std.json.Value {
+    var obj = std.json.ObjectMap.init(allocator);
+
+    try obj.put("name", .{ .string = sym.name });
+    if (sym.detail) |detail| {
+        try obj.put("detail", .{ .string = detail });
+    }
+    try obj.put("kind", .{ .integer = @intFromEnum(sym.kind) });
+    try obj.put("range", try rangeToJson(allocator, sym.range));
+    try obj.put("selectionRange", try rangeToJson(allocator, sym.selection_range));
+
+    if (sym.children) |children| {
+        var arr = std.json.Array.init(allocator);
+        for (children) |child| {
+            try arr.append(try documentSymbolToJson(allocator, child));
+        }
+        try obj.put("children", .{ .array = arr });
+    }
 
     return .{ .object = obj };
 }

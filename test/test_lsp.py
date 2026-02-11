@@ -69,6 +69,7 @@ def test_initialize():
 
     caps = init_response["result"]["capabilities"]
     assert caps["textDocumentSync"] == 1
+    assert caps["documentSymbolProvider"] is True, f"Expected documentSymbolProvider, got: {caps}"
 
     info = init_response["result"]["serverInfo"]
     assert info["name"] == "ssl-lsp"
@@ -216,6 +217,106 @@ def test_unknown_method():
     print("PASS: test_unknown_method")
 
 
+def test_document_symbols():
+    """documentSymbol returns procedures and variables for valid SSL."""
+    valid_ssl = "variable count := 0;\n\nprocedure start begin\n    variable localvar;\n    count := 1;\nend\n"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///tmp/test_symbols.ssl",
+                "languageId": "ssl",
+                "version": 1,
+                "text": valid_ssl,
+            }
+        },
+    }
+    doc_symbol_req = {
+        "jsonrpc": "2.0",
+        "id": 10,
+        "method": "textDocument/documentSymbol",
+        "params": {
+            "textDocument": {"uri": "file:///tmp/test_symbols.ssl"},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, doc_symbol_req, *shutdown_messages())
+
+    symbol_resp = [r for r in responses if r.get("id") == 10]
+    assert len(symbol_resp) == 1, f"Expected documentSymbol response, got: {responses}"
+    assert "result" in symbol_resp[0], f"Expected result, got: {symbol_resp[0]}"
+
+    symbols = symbol_resp[0]["result"]
+    assert isinstance(symbols, list), f"Expected array result, got: {type(symbols)}"
+    assert len(symbols) > 0, "Expected at least one symbol"
+
+    # Find the procedure symbol (kind=12 is Function)
+    funcs = [s for s in symbols if s["kind"] == 12]
+    assert len(funcs) >= 1, f"Expected at least one function symbol, got: {symbols}"
+
+    # Check structure of the function symbol
+    func = funcs[0]
+    assert func["name"] == "start", f"Expected 'start' proc, got: {func['name']}"
+    assert "range" in func
+    assert "selectionRange" in func
+    assert "start" in func["range"]
+    assert "end" in func["range"]
+
+    # Check children (local variables)
+    if "children" in func and func["children"]:
+        child = func["children"][0]
+        assert child["kind"] == 13, f"Expected Variable kind (13), got: {child['kind']}"
+        assert child["name"] == "localvar", f"Expected 'localvar', got: {child['name']}"
+
+    # Find the global variable symbol (kind=13 is Variable)
+    vars_ = [s for s in symbols if s["kind"] == 13]
+    assert len(vars_) >= 1, f"Expected at least one variable symbol, got: {symbols}"
+
+    # Find the 'count' global variable
+    count_vars = [v for v in vars_ if v["name"] == "count"]
+    assert len(count_vars) >= 1, f"Expected 'count' variable, got: {vars_}"
+
+    print(f"PASS: test_document_symbols ({len(symbols)} symbol(s), {len(funcs)} function(s), {len(vars_)} variable(s))")
+
+
+def test_document_symbols_empty():
+    """documentSymbol returns empty array for invalid SSL."""
+    bad_ssl = "this is not valid ssl code;\n"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": "file:///tmp/test_symbols_empty.ssl",
+                "languageId": "ssl",
+                "version": 1,
+                "text": bad_ssl,
+            }
+        },
+    }
+    doc_symbol_req = {
+        "jsonrpc": "2.0",
+        "id": 11,
+        "method": "textDocument/documentSymbol",
+        "params": {
+            "textDocument": {"uri": "file:///tmp/test_symbols_empty.ssl"},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, doc_symbol_req, *shutdown_messages())
+
+    symbol_resp = [r for r in responses if r.get("id") == 11]
+    assert len(symbol_resp) == 1, f"Expected documentSymbol response, got: {responses}"
+    assert "result" in symbol_resp[0], f"Expected result, got: {symbol_resp[0]}"
+
+    symbols = symbol_resp[0]["result"]
+    assert isinstance(symbols, list), f"Expected array result, got: {type(symbols)}"
+    assert len(symbols) == 0, f"Expected empty symbols for invalid SSL, got: {symbols}"
+
+    print("PASS: test_document_symbols_empty")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -224,6 +325,8 @@ if __name__ == "__main__":
         test_did_change_updates_diagnostics,
         test_shutdown_response,
         test_unknown_method,
+        test_document_symbols,
+        test_document_symbols_empty,
     ]
 
     passed = 0
