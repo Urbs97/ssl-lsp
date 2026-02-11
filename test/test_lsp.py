@@ -406,6 +406,106 @@ def test_goto_definition_variable():
     print("PASS: test_goto_definition_variable")
 
 
+def test_find_references_procedure():
+    """Find references on a procedure returns call sites (and declaration with includeDeclaration)."""
+    ssl_text = open(os.path.join(os.path.dirname(__file__), "simple.ssl")).read()
+    uri = "file:///tmp/test_refs_proc.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "test" in "call test;" at line 9, character 9
+    refs_req = {
+        "jsonrpc": "2.0",
+        "id": 30,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 9, "character": 9},
+            "context": {"includeDeclaration": True},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, refs_req, *shutdown_messages())
+
+    refs_resp = [r for r in responses if r.get("id") == 30]
+    assert len(refs_resp) == 1, f"Expected references response, got: {responses}"
+    assert "result" in refs_resp[0], f"Expected result, got: {refs_resp[0]}"
+
+    result = refs_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+    assert len(result) >= 2, f"Expected at least 2 locations (declaration + call site), got: {result}"
+
+    lines = sorted([loc["range"]["start"]["line"] for loc in result])
+    # procedure test is declared at line 2, referenced at line 9
+    assert 2 in lines, f"Expected declaration at line 2, got lines: {lines}"
+    assert 9 in lines, f"Expected reference at line 9, got lines: {lines}"
+
+    # All locations should have the correct URI
+    for loc in result:
+        assert loc["uri"] == uri, f"Expected uri {uri}, got: {loc['uri']}"
+
+    print(f"PASS: test_find_references_procedure ({len(result)} location(s))")
+
+
+def test_find_references_variable():
+    """Find references on a variable returns usage sites (and declaration with includeDeclaration)."""
+    ssl_text = open(os.path.join(os.path.dirname(__file__), "simple.ssl")).read()
+    uri = "file:///tmp/test_refs_var.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "x" in "x := 1;" at line 8, character 4
+    refs_req = {
+        "jsonrpc": "2.0",
+        "id": 31,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 8, "character": 4},
+            "context": {"includeDeclaration": True},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, refs_req, *shutdown_messages())
+
+    refs_resp = [r for r in responses if r.get("id") == 31]
+    assert len(refs_resp) == 1, f"Expected references response, got: {responses}"
+    assert "result" in refs_resp[0], f"Expected result, got: {refs_resp[0]}"
+
+    result = refs_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+    assert len(result) >= 2, f"Expected at least 2 locations (declaration + usage), got: {result}"
+
+    lines = sorted([loc["range"]["start"]["line"] for loc in result])
+    # variable x is declared at line 0, referenced at line 8
+    assert 0 in lines, f"Expected declaration at line 0, got lines: {lines}"
+    assert 8 in lines, f"Expected reference at line 8, got lines: {lines}"
+
+    # All locations should have the correct URI
+    for loc in result:
+        assert loc["uri"] == uri, f"Expected uri {uri}, got: {loc['uri']}"
+
+    print(f"PASS: test_find_references_variable ({len(result)} location(s))")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -418,6 +518,8 @@ if __name__ == "__main__":
         test_document_symbols_empty,
         test_goto_definition_procedure,
         test_goto_definition_variable,
+        test_find_references_procedure,
+        test_find_references_variable,
     ]
 
     passed = 0
