@@ -12,10 +12,10 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
   - Find references (all usages of a procedure or variable)
   - Hover information (signature, doc comments, line range, reference count)
   - Completion (built-in opcodes with signatures/descriptions, user-defined procedures and variables)
+  - Signature help (parameter hints for built-in opcodes and user-defined procedures)
 
 ### Planned
 - Go to definition for built-in opcodes
-- Signature help for built-in opcodes
 
 ## Requirements
 
@@ -106,7 +106,8 @@ src/
         ├── definition.zig
         ├── references.zig
         ├── hover.zig
-        └── completion.zig
+        ├── completion.zig
+        └── signature_help.zig
 ```
 
 ## Testing

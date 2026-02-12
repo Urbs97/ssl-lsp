@@ -643,6 +643,202 @@ def test_completion_no_prefix():
     print("PASS: test_completion_no_prefix")
 
 
+def test_signature_help_capability():
+    """Initialize response advertises signatureHelpProvider with trigger characters."""
+    responses, stderr, code = run_lsp(*init_messages(), *shutdown_messages())
+
+    caps = responses[0]["result"]["capabilities"]
+    assert "signatureHelpProvider" in caps, f"Expected signatureHelpProvider, got: {caps}"
+    provider = caps["signatureHelpProvider"]
+    assert "triggerCharacters" in provider, f"Expected triggerCharacters, got: {provider}"
+    triggers = provider["triggerCharacters"]
+    assert "(" in triggers, f"Expected '(' in trigger chars, got: {triggers}"
+    assert "," in triggers, f"Expected ',' in trigger chars, got: {triggers}"
+
+    print("PASS: test_signature_help_capability")
+
+
+def test_signature_help_builtin():
+    """Signature help shows parameter info for a built-in opcode."""
+    # Cursor inside random( on line 3, character 11: "    random(|"
+    ssl_text = "variable x;\n\nprocedure start begin\n    random(\nend\n"
+    uri = "file:///tmp/test_sighelp_builtin.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    sig_req = {
+        "jsonrpc": "2.0",
+        "id": 50,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 11},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, sig_req, *shutdown_messages())
+
+    sig_resp = [r for r in responses if r.get("id") == 50]
+    assert len(sig_resp) == 1, f"Expected signatureHelp response, got: {responses}"
+    assert "result" in sig_resp[0], f"Expected result, got: {sig_resp[0]}"
+
+    result = sig_resp[0]["result"]
+    assert result is not None, "Expected SignatureHelp, got null"
+    assert "signatures" in result, f"Expected signatures array, got: {result}"
+    assert len(result["signatures"]) == 1, f"Expected 1 signature, got: {len(result['signatures'])}"
+
+    sig = result["signatures"][0]
+    assert "random" in sig["label"], f"Expected 'random' in label, got: {sig['label']}"
+    assert "parameters" in sig, f"Expected parameters, got: {sig}"
+    assert len(sig["parameters"]) == 2, f"Expected 2 parameters (min, max), got: {len(sig['parameters'])}"
+
+    # First param active (activeParameter == 0)
+    assert result["activeParameter"] == 0, f"Expected activeParameter 0, got: {result['activeParameter']}"
+
+    # Check documentation exists
+    assert "documentation" in sig, f"Expected documentation, got: {sig}"
+
+    print(f"PASS: test_signature_help_builtin (label: {sig['label']})")
+
+
+def test_signature_help_builtin_second_param():
+    """Signature help highlights the second parameter after a comma."""
+    # "    random(1, " — cursor at character 14
+    ssl_text = "variable x;\n\nprocedure start begin\n    random(1, \nend\n"
+    uri = "file:///tmp/test_sighelp_second.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    sig_req = {
+        "jsonrpc": "2.0",
+        "id": 51,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 14},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, sig_req, *shutdown_messages())
+
+    sig_resp = [r for r in responses if r.get("id") == 51]
+    result = sig_resp[0]["result"]
+    assert result is not None, "Expected SignatureHelp, got null"
+    assert result["activeParameter"] == 1, f"Expected activeParameter 1, got: {result['activeParameter']}"
+
+    print("PASS: test_signature_help_builtin_second_param")
+
+
+def test_signature_help_user_procedure():
+    """Signature help shows parameters for a user-defined procedure."""
+    # Valid SSL with a two-arg procedure; cursor placed inside the call
+    ssl_text = (
+        "procedure calculate(variable a, variable b) begin\n"
+        "end\n"
+        "\n"
+        "procedure start begin\n"
+        "    call calculate(1, 2);\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_sighelp_user.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "2" in "calculate(1, 2)" — line 4, character 22 (second param)
+    sig_req = {
+        "jsonrpc": "2.0",
+        "id": 52,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 4, "character": 22},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, sig_req, *shutdown_messages())
+
+    sig_resp = [r for r in responses if r.get("id") == 52]
+    assert len(sig_resp) == 1, f"Expected signatureHelp response, got: {responses}"
+
+    result = sig_resp[0]["result"]
+    assert result is not None, "Expected SignatureHelp for user procedure, got null"
+
+    sig = result["signatures"][0]
+    assert "calculate" in sig["label"], f"Expected 'calculate' in label, got: {sig['label']}"
+    assert "parameters" in sig, f"Expected parameters, got: {sig}"
+    assert len(sig["parameters"]) == 2, f"Expected 2 parameters, got: {len(sig['parameters'])}"
+
+    # Second param active (after comma)
+    assert result["activeParameter"] == 1, f"Expected activeParameter 1, got: {result['activeParameter']}"
+
+    print(f"PASS: test_signature_help_user_procedure (label: {sig['label']})")
+
+
+def test_signature_help_not_in_call():
+    """Signature help returns null when cursor is not inside a function call."""
+    ssl_text = "variable x;\n\nprocedure start begin\n    x := 1;\nend\n"
+    uri = "file:///tmp/test_sighelp_null.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "x := 1;" — not inside any call parens
+    sig_req = {
+        "jsonrpc": "2.0",
+        "id": 53,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 6},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, sig_req, *shutdown_messages())
+
+    sig_resp = [r for r in responses if r.get("id") == 53]
+    assert len(sig_resp) == 1, f"Expected signatureHelp response, got: {responses}"
+
+    result = sig_resp[0]["result"]
+    assert result is None, f"Expected null when not in a call, got: {result}"
+
+    print("PASS: test_signature_help_not_in_call")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -660,6 +856,11 @@ if __name__ == "__main__":
         test_completion_builtins,
         test_completion_user_symbols,
         test_completion_no_prefix,
+        test_signature_help_capability,
+        test_signature_help_builtin,
+        test_signature_help_builtin_second_param,
+        test_signature_help_user_procedure,
+        test_signature_help_not_in_call,
     ]
 
     passed = 0

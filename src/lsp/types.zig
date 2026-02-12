@@ -122,6 +122,64 @@ pub const CompletionItemKind = enum(u8) {
     Variable = 6,
 };
 
+pub const ParameterInformation = struct {
+    label: []const u8,
+    documentation: ?[]const u8 = null,
+
+    pub fn toJson(self: ParameterInformation, allocator: std.mem.Allocator) !std.json.Value {
+        var obj = std.json.ObjectMap.init(allocator);
+        try obj.put("label", .{ .string = self.label });
+        if (self.documentation) |doc| {
+            try obj.put("documentation", .{ .string = doc });
+        }
+        return .{ .object = obj };
+    }
+};
+
+pub const SignatureInformation = struct {
+    label: []const u8,
+    documentation: ?MarkupContent = null,
+    parameters: ?[]const ParameterInformation = null,
+    activeParameter: ?u32 = null,
+
+    pub fn toJson(self: SignatureInformation, allocator: std.mem.Allocator) !std.json.Value {
+        var obj = std.json.ObjectMap.init(allocator);
+        try obj.put("label", .{ .string = self.label });
+        if (self.documentation) |doc| {
+            try obj.put("documentation", try doc.toJson(allocator));
+        }
+        if (self.parameters) |params| {
+            var arr = std.json.Array.init(allocator);
+            for (params) |p| {
+                try arr.append(try p.toJson(allocator));
+            }
+            try obj.put("parameters", .{ .array = arr });
+        }
+        if (self.activeParameter) |ap| {
+            try obj.put("activeParameter", .{ .integer = @intCast(ap) });
+        }
+        return .{ .object = obj };
+    }
+};
+
+pub const SignatureHelp = struct {
+    signatures: []const SignatureInformation,
+    activeSignature: u32 = 0,
+    activeParameter: u32 = 0,
+
+    pub fn toJson(self: SignatureHelp, allocator: std.mem.Allocator) !std.json.Value {
+        var obj = std.json.ObjectMap.init(allocator);
+        var arr = std.json.Array.init(allocator);
+        for (self.signatures) |sig| {
+            try arr.append(try sig.toJson(allocator));
+        }
+        try obj.put("signatures", .{ .array = arr });
+        try obj.put("activeSignature", .{ .integer = @intCast(self.activeSignature) });
+        try obj.put("activeParameter", .{ .integer = @intCast(self.activeParameter) });
+        return .{ .object = obj };
+    }
+};
+
 pub const CompletionItem = struct {
     label: []const u8,
     kind: CompletionItemKind,
