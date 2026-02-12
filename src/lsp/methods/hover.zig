@@ -58,17 +58,23 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         }
     }
 
-    // Search local variables in each procedure
+    // Search local variables in the enclosing procedure only
+    const cursor_line: u32 = @intCast(pos.line + 1); // parser lines are 1-indexed
     for (0..pr.num_procs) |pi| {
         const proc = pr.getProc(pi);
-        for (0..proc.num_local_vars) |vi| {
-            const local_var = pr.getProcVar(pi, vi);
-            if (std.mem.eql(u8, local_var.name, word)) {
-                const md = try helpers.formatVarHover(allocator, local_var, proc.name, pr, doc.text);
-                const hover_result = types.Hover{ .contents = .{ .value = md } };
-                try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
-                return;
+        const start = proc.start_line orelse continue;
+        const end = proc.end_line orelse continue;
+        if (cursor_line >= start and cursor_line <= end) {
+            for (0..proc.num_local_vars) |vi| {
+                const local_var = pr.getProcVar(pi, vi);
+                if (std.mem.eql(u8, local_var.name, word)) {
+                    const md = try helpers.formatVarHover(allocator, local_var, proc.name, pr, doc.text);
+                    const hover_result = types.Hover{ .contents = .{ .value = md } };
+                    try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
+                    return;
+                }
             }
+            break;
         }
     }
 

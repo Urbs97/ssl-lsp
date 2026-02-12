@@ -70,18 +70,24 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
             }
         }
 
-        // Local variables from each procedure
+        // Local variables from the enclosing procedure only
+        const cursor_line: u32 = @intCast(pos.line + 1); // parser lines are 1-indexed
         for (0..pr.num_procs) |pi| {
             const proc = pr.getProc(pi);
-            for (0..proc.num_local_vars) |vi| {
-                const local_var = pr.getProcVar(pi, vi);
-                if (std.ascii.startsWithIgnoreCase(local_var.name, prefix)) {
-                    const item = types.CompletionItem{
-                        .label = local_var.name,
-                        .kind = .Variable,
-                    };
-                    try items.append(try item.toJson(allocator));
+            const start = proc.start_line orelse continue;
+            const end = proc.end_line orelse continue;
+            if (cursor_line >= start and cursor_line <= end) {
+                for (0..proc.num_local_vars) |vi| {
+                    const local_var = pr.getProcVar(pi, vi);
+                    if (std.ascii.startsWithIgnoreCase(local_var.name, prefix)) {
+                        const item = types.CompletionItem{
+                            .label = local_var.name,
+                            .kind = .Variable,
+                        };
+                        try items.append(try item.toJson(allocator));
+                    }
                 }
+                break;
             }
         }
     }
