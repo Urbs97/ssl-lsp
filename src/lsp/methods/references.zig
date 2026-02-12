@@ -1,5 +1,6 @@
 const std = @import("std");
 const Context = @import("../context.zig").Context;
+const defines_mod = @import("../defines.zig");
 const helpers = @import("../helpers.zig");
 const types = @import("../types.zig");
 
@@ -149,6 +150,48 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
                 }
             }
             break;
+        }
+    }
+
+    // Search #define macros
+    if (doc.defines) |*defs| {
+        if (defs.lookup(word)) |def| {
+            if (include_declaration) {
+                const def_uri = if (std.mem.eql(u8, def.file, "current file"))
+                    uri
+                else
+                    try helpers.pathToUri(allocator, def.file);
+                const def_line: u32 = if (def.line > 0) def.line - 1 else 0;
+                const name_len: u32 = @intCast(def.name.len);
+                const loc = types.Location{
+                    .uri = def_uri,
+                    .range = .{
+                        .start = .{ .line = def_line, .character = 0 },
+                        .end = .{ .line = def_line, .character = name_len },
+                    },
+                };
+                try locations.append(try loc.toJson(allocator));
+            }
+
+            // Scan current document for all whole-word occurrences
+            const occurrences = try helpers.findWordOccurrences(allocator, doc.text, word);
+            for (occurrences) |occ| {
+                // Skip the #define directive line itself for current-file defines
+                // to avoid duplicating the declaration
+                if (std.mem.eql(u8, def.file, "current file") and occ.line == def.line - 1) continue;
+
+                const loc = types.Location{
+                    .uri = uri,
+                    .range = .{
+                        .start = .{ .line = occ.line, .character = occ.character },
+                        .end = .{ .line = occ.line, .character = occ.character + @as(u32, @intCast(word.len)) },
+                    },
+                };
+                try locations.append(try loc.toJson(allocator));
+            }
+
+            try ctx.sendResponse(allocator, req_id, .{ .array = locations });
+            return;
         }
     }
 

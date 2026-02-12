@@ -3,6 +3,7 @@ const Context = @import("../context.zig").Context;
 const helpers = @import("../helpers.zig");
 const types = @import("../types.zig");
 const builtins = @import("../builtins.zig");
+const defines_mod = @import("../defines.zig");
 
 const log = std.log.scoped(.server);
 
@@ -117,6 +118,51 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
                 };
                 try ctx.sendResponse(allocator, req_id, try result.toJson(allocator));
                 return;
+            }
+        }
+    }
+
+    // Search #define macros
+    if (doc.defines) |*defs| {
+        if (defs.lookup(call_ctx.func_name)) |def| {
+            if (def.params) |def_params| {
+                if (def_params.len > 0) {
+                    // Build label: "name(param1, param2)"
+                    var out: std.Io.Writer.Allocating = .init(allocator);
+                    const w = &out.writer;
+                    try w.writeAll(def.name);
+                    try w.writeByte('(');
+                    const param_infos = try allocator.alloc(types.ParameterInformation, def_params.len);
+                    for (def_params, 0..) |p, i| {
+                        if (i > 0) try w.writeAll(", ");
+                        param_infos[i] = .{ .label = p };
+                        try w.writeAll(p);
+                    }
+                    try w.writeByte(')');
+
+                    const label = out.written();
+
+                    const active_param = @min(call_ctx.active_param, @as(u32, @intCast(def_params.len - 1)));
+
+                    const documentation: ?types.MarkupContent = if (def.doc_comment) |dc| .{ .value = dc } else null;
+
+                    const sig = types.SignatureInformation{
+                        .label = label,
+                        .documentation = documentation,
+                        .parameters = param_infos,
+                        .activeParameter = active_param,
+                    };
+                    const sigs = try allocator.alloc(types.SignatureInformation, 1);
+                    sigs[0] = sig;
+
+                    const result = types.SignatureHelp{
+                        .signatures = sigs,
+                        .activeSignature = 0,
+                        .activeParameter = active_param,
+                    };
+                    try ctx.sendResponse(allocator, req_id, try result.toJson(allocator));
+                    return;
+                }
             }
         }
     }

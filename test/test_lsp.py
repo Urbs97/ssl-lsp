@@ -839,6 +839,210 @@ def test_signature_help_not_in_call():
     print("PASS: test_signature_help_not_in_call")
 
 
+def test_goto_definition_define():
+    """Go-to-definition on a #define macro jumps to its definition line."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX_HP;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_goto_def_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MAX_HP" in "    variable x := MAX_HP;" at line 3, character 18
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 22]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location, got null"
+    assert result["uri"] == uri
+    # #define MAX_HP is at line 0 (0-indexed)
+    assert result["range"]["start"]["line"] == 0, f"Expected line 0, got: {result['range']['start']['line']}"
+
+    print("PASS: test_goto_definition_define")
+
+
+def test_goto_definition_include():
+    """Go-to-definition on a #include directive opens the included file."""
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    real_path = os.path.join(test_dir, "test_goto_def_include.ssl")
+    uri = "file://" + real_path
+    ssl_text = '#include "headers/sfall.h"\n\nprocedure start begin\nend\n'
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on the #include line (line 0, character 10 — on the path)
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 0, "character": 10},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 24]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location for #include, got null"
+    assert result["uri"].startswith("file://"), f"Expected file:// URI, got: {result['uri']}"
+    assert result["uri"].endswith("headers/sfall.h"), f"Expected URI ending with headers/sfall.h, got: {result['uri']}"
+    assert result["range"]["start"]["line"] == 0, f"Expected line 0, got: {result['range']['start']['line']}"
+
+    print(f"PASS: test_goto_definition_include (-> {'/'.join(result['uri'].split('/')[-2:])})")
+
+
+def test_goto_definition_define_from_header():
+    """Go-to-definition on a #define from an included header jumps to the header file."""
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    # Use a URI with the real test directory so #include paths resolve
+    real_path = os.path.join(test_dir, "test_goto_def_header.ssl")
+    uri = "file://" + real_path
+    ssl_text = '#include "headers/sfall.h"\n\nprocedure start begin\n    variable x := WORLDMAP;\nend\n'
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "WORLDMAP" in "    variable x := WORLDMAP;" at line 3, character 18
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 23,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 23]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location for header define, got null"
+    # URI should point to sfall.h in the headers directory
+    assert result["uri"].endswith("headers/sfall.h"), f"Expected URI ending with headers/sfall.h, got: {result['uri']}"
+    assert result["uri"].startswith("file://"), f"Expected file:// URI, got: {result['uri']}"
+    assert result["range"]["start"]["line"] >= 0, f"Expected non-negative line, got: {result['range']['start']['line']}"
+
+    print(f"PASS: test_goto_definition_define_from_header (-> {result['uri'].split('/')[-1]}:{result['range']['start']['line']})")
+
+
+def test_find_references_define():
+    """Find references on a #define macro returns its usages in the current file."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX_HP;\n"
+        "    variable y := MAX_HP;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_refs_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MAX_HP" at line 3, character 18
+    refs_req = {
+        "jsonrpc": "2.0",
+        "id": 32,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+            "context": {"includeDeclaration": True},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, refs_req, *shutdown_messages())
+
+    refs_resp = [r for r in responses if r.get("id") == 32]
+    assert len(refs_resp) == 1, f"Expected references response, got: {responses}"
+    assert "result" in refs_resp[0], f"Expected result, got: {refs_resp[0]}"
+
+    result = refs_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+    # Declaration at line 0 + usages at lines 3 and 4 = 3 locations
+    assert len(result) == 3, f"Expected 3 locations (declaration + 2 usages), got {len(result)}: {result}"
+
+    lines = sorted([loc["range"]["start"]["line"] for loc in result])
+    assert 0 in lines, f"Expected declaration at line 0, got lines: {lines}"
+    assert 3 in lines, f"Expected reference at line 3, got lines: {lines}"
+    assert 4 in lines, f"Expected reference at line 4, got lines: {lines}"
+
+    # Usage locations should have correct character offsets
+    usage_locs = [loc for loc in result if loc["range"]["start"]["line"] in (3, 4)]
+    for loc in usage_locs:
+        assert loc["range"]["start"]["character"] == 18, f"Expected character 18, got: {loc['range']['start']['character']}"
+        assert loc["range"]["end"]["character"] == 24, f"Expected end character 24, got: {loc['range']['end']['character']}"
+
+    # All locations should have the correct URI
+    for loc in result:
+        assert loc["uri"] == uri, f"Expected uri {uri}, got: {loc['uri']}"
+
+    print(f"PASS: test_find_references_define ({len(result)} location(s))")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -851,8 +1055,12 @@ if __name__ == "__main__":
         test_document_symbols_empty,
         test_goto_definition_procedure,
         test_goto_definition_variable,
+        test_goto_definition_define,
+        test_goto_definition_include,
+        test_goto_definition_define_from_header,
         test_find_references_procedure,
         test_find_references_variable,
+        test_find_references_define,
         test_completion_builtins,
         test_completion_user_symbols,
         test_completion_no_prefix,

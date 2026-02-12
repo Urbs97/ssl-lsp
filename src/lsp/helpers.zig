@@ -464,6 +464,46 @@ pub fn formatVarHover(allocator: std.mem.Allocator, v: parser.Variable, proc_nam
     return out.written();
 }
 
+/// Construct a file:// URI from an absolute filesystem path.
+pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    try out.writer.writeAll("file://");
+    try out.writer.writeAll(path);
+    return out.written();
+}
+
+pub const WordOccurrence = struct {
+    line: u32,
+    character: u32,
+};
+
+/// Find all whole-word occurrences of `word` in `text`, returning line/character positions.
+/// A "whole word" match means the character before and after are not identifier characters.
+pub fn findWordOccurrences(allocator: std.mem.Allocator, text: []const u8, word: []const u8) ![]WordOccurrence {
+    var results = std.ArrayListUnmanaged(WordOccurrence){};
+    defer results.deinit(allocator);
+
+    var line_num: u32 = 0;
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    while (line_iter.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        var col: usize = 0;
+        while (col + word.len <= line.len) {
+            if (std.mem.eql(u8, line[col .. col + word.len], word)) {
+                const before_ok = col == 0 or !isIdentChar(line[col - 1]);
+                const after_ok = col + word.len >= line.len or !isIdentChar(line[col + word.len]);
+                if (before_ok and after_ok) {
+                    try results.append(allocator, .{ .line = line_num, .character = @intCast(col) });
+                }
+            }
+            col += 1;
+        }
+        line_num += 1;
+    }
+
+    return try allocator.dupe(WordOccurrence, results.items);
+}
+
 test "getCallContext basic" {
     const text = "random(1, 2)";
     // Cursor after opening paren: random(|

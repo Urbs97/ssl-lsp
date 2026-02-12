@@ -120,6 +120,7 @@ pub const Hover = struct {
 pub const CompletionItemKind = enum(u8) {
     Function = 3,
     Variable = 6,
+    Constant = 21,
 };
 
 pub const ParameterInformation = struct {

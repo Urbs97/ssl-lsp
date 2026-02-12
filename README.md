@@ -8,11 +8,12 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
 - **LSP Server** - Language Server Protocol support over stdio for editor integration
   - Real-time diagnostics (syntax errors as you type)
   - Document symbols (procedure/variable outline)
-  - Go to definition (user-defined procedures and variables)
-  - Find references (all usages of a procedure or variable)
+  - Go to definition (procedures, variables, `#define` macros, `#include` files)
+  - Find references (procedures, variables, `#define` macros)
   - Hover information (signature, doc comments, line range, reference count)
-  - Completion (built-in opcodes with signatures/descriptions, user-defined procedures and variables)
-  - Signature help (parameter hints for built-in opcodes and user-defined procedures)
+  - Completion (built-in opcodes, user-defined procedures/variables, `#define` macros)
+  - Signature help (parameter hints for built-in opcodes, user-defined procedures, and function-like macros)
+  - `#define`/`#include` support (recursive header parsing, macro expansion display, doc comments)
 
 ### Planned
 - Go to definition for built-in opcodes
@@ -91,6 +92,7 @@ src/
     ├── server.zig        # LSP message loop and method routing
     ├── context.zig       # Server state (open documents, allocators)
     ├── builtins.zig      # Built-in opcode database (parsed from opcodes.txt)
+    ├── defines.zig       # #define/#include extraction from headers
     ├── helpers.zig       # Parameter extraction and formatting helpers
     ├── transport.zig     # JSON-RPC framing
     ├── types.zig         # LSP protocol types
@@ -113,7 +115,8 @@ src/
 ## Testing
 
 ```bash
-zig build test
+zig build test              # Unit tests
+python3 test/test_lsp.py    # Integration tests (requires a built binary)
 ```
 
 ## Acknowledgments

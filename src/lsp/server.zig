@@ -125,6 +125,7 @@ pub fn run(allocator: std.mem.Allocator) !void {
 test {
     _ = context;
     _ = @import("helpers.zig");
+    _ = @import("defines.zig");
     _ = initialize;
     _ = initialized;
     _ = shutdown;

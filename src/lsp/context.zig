@@ -3,6 +3,7 @@ const transport = @import("transport.zig");
 const types = @import("types.zig");
 const errors = @import("../parsing/errors.zig");
 const parser = @import("../parsing/parser.zig");
+const defines_mod = @import("defines.zig");
 
 const log = std.log.scoped(.server);
 
@@ -11,10 +12,12 @@ pub const Document = struct {
     allocator: std.mem.Allocator,
     text: []const u8,
     parse_result: ?parser.ParseResult = null,
+    defines: ?defines_mod.DefineSet = null,
 
     pub fn deinit(self: *Document) void {
         self.allocator.free(self.text);
         if (self.parse_result) |*pr| pr.deinit();
+        if (self.defines) |*d| d.deinit();
     }
 };
 
@@ -125,6 +128,10 @@ pub const Context = struct {
                 if (doc.parse_result) |*old| old.deinit();
                 doc.parse_result = parse_result;
             }
+
+            // Extract #define macros from included headers
+            if (doc.defines) |*old_defs| old_defs.deinit();
+            doc.defines = defines_mod.extractDefines(self.allocator, text, include_dir) catch null;
         } else {
             // Document not in map (e.g. didClose clearing diagnostics) — clean up
             if (parse_result) |*pr| pr.deinit();
