@@ -150,6 +150,10 @@ const Server = struct {
             if (id) |req_id| {
                 try self.handleReferences(allocator, req_id, params);
             }
+        } else if (std.mem.eql(u8, method, "textDocument/hover")) {
+            if (id) |req_id| {
+                try self.handleHover(allocator, req_id, params);
+            }
         } else {
             // Unknown method - send MethodNotFound for requests (those with id)
             if (id) |req_id| {
@@ -164,6 +168,7 @@ const Server = struct {
         try capabilities.put("documentSymbolProvider", .{ .bool = true });
         try capabilities.put("definitionProvider", .{ .bool = true });
         try capabilities.put("referencesProvider", .{ .bool = true });
+        try capabilities.put("hoverProvider", .{ .bool = true });
 
         var result = std.json.ObjectMap.init(allocator);
         try result.put("capabilities", .{ .object = capabilities });
@@ -699,6 +704,89 @@ const Server = struct {
         // No match found
         try self.sendResponse(allocator, id, .{ .array = locations });
     }
+
+    fn handleHover(self: *Server, allocator: std.mem.Allocator, id: std.json.Value, params: std.json.Value) !void {
+        const td = getObject(params, "textDocument") orelse {
+            log.err("hover: missing 'textDocument'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const uri = getString(td, "uri") orelse {
+            log.err("hover: missing 'uri'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const position = getObject(params, "position") orelse {
+            log.err("hover: missing 'position'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const line = getInteger(position, "line") orelse {
+            log.err("hover: missing 'position.line'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+        const character = getInteger(position, "character") orelse {
+            log.err("hover: missing 'position.character'", .{});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        const doc = self.documents.getPtr(uri) orelse {
+            log.debug("hover: unknown document {s}", .{uri});
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        var pr = doc.parse_result orelse {
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        const word = getWordAtPosition(doc.text, @intCast(line), @intCast(character)) orelse {
+            try self.sendResponse(allocator, id, .null);
+            return;
+        };
+
+        // Search procedures
+        for (0..pr.num_procs) |i| {
+            const proc = pr.getProc(i);
+            if (std.mem.eql(u8, proc.name, word)) {
+                const md = try formatProcHover(allocator, proc, i, &pr, doc.text);
+                const hover = types.Hover{ .contents = .{ .value = md } };
+                try self.sendResponse(allocator, id, try types.hoverToJson(allocator, hover));
+                return;
+            }
+        }
+
+        // Search global variables
+        for (0..pr.num_vars) |i| {
+            const v = pr.getVar(i);
+            if (std.mem.eql(u8, v.name, word)) {
+                const md = try formatVarHover(allocator, v, null, &pr, doc.text);
+                const hover = types.Hover{ .contents = .{ .value = md } };
+                try self.sendResponse(allocator, id, try types.hoverToJson(allocator, hover));
+                return;
+            }
+        }
+
+        // Search local variables in each procedure
+        for (0..pr.num_procs) |pi| {
+            const proc = pr.getProc(pi);
+            for (0..proc.num_local_vars) |vi| {
+                const local_var = pr.getProcVar(pi, vi);
+                if (std.mem.eql(u8, local_var.name, word)) {
+                    const md = try formatVarHover(allocator, local_var, proc.name, &pr, doc.text);
+                    const hover = types.Hover{ .contents = .{ .value = md } };
+                    try self.sendResponse(allocator, id, try types.hoverToJson(allocator, hover));
+                    return;
+                }
+            }
+        }
+
+        // No match found
+        try self.sendResponse(allocator, id, .null);
+    }
 };
 
 // JSON helper functions
@@ -804,6 +892,168 @@ fn getWordAtPosition(text: []const u8, line: u32, character: u32) ?[]const u8 {
 
 fn isIdentChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
+}
+
+/// Extract consecutive `///` doc comment lines immediately above a 1-indexed declaration line.
+/// Returns the joined comment text (without the `///` prefix), or null if none found.
+fn extractDocComment(allocator: std.mem.Allocator, text: []const u8, declared_line_1: u32) !?[]const u8 {
+    if (declared_line_1 <= 1) return null;
+
+    // Build an index of line start offsets
+    var line_starts = std.ArrayListUnmanaged(usize){ .items = &.{}, .capacity = 0 };
+    defer line_starts.deinit(allocator);
+    try line_starts.append(allocator, 0);
+    for (text, 0..) |ch, idx| {
+        if (ch == '\n' and idx + 1 < text.len) {
+            try line_starts.append(allocator, idx + 1);
+        }
+    }
+
+    const target_line_0: usize = declared_line_1 - 1; // convert to 0-indexed
+
+    // Collect /// lines going upward from the line above the declaration
+    var comment_lines = std.ArrayListUnmanaged([]const u8){ .items = &.{}, .capacity = 0 };
+    defer comment_lines.deinit(allocator);
+
+    var cur = target_line_0;
+    while (cur > 0) {
+        cur -= 1;
+        if (cur >= line_starts.items.len) break;
+        const start = line_starts.items[cur];
+        var end = start;
+        while (end < text.len and text[end] != '\n') end += 1;
+        const line_text = text[start..end];
+
+        // Trim leading whitespace
+        const trimmed = std.mem.trimLeft(u8, line_text, " \t");
+        if (std.mem.startsWith(u8, trimmed, "///")) {
+            // Strip the "///" prefix and one optional leading space
+            var content = trimmed[3..];
+            if (content.len > 0 and content[0] == ' ') content = content[1..];
+            try comment_lines.append(allocator, content);
+        } else {
+            break;
+        }
+    }
+
+    if (comment_lines.items.len == 0) return null;
+
+    // Reverse to get top-to-bottom order and join with newlines
+    std.mem.reverse([]const u8, comment_lines.items);
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    for (comment_lines.items, 0..) |cline, i| {
+        if (i > 0) try out.writer.writeByte('\n');
+        try out.writer.writeAll(cline);
+    }
+    return out.written();
+}
+
+/// Format hover markdown for a procedure
+fn formatProcHover(allocator: std.mem.Allocator, proc: parser.Procedure, proc_index: usize, pr: *parser.ParseResult, text: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    const w = &out.writer;
+
+    // Code block header
+    try w.writeAll("```ssl\n");
+
+    // Flags prefix
+    var flags_buf: [128]u8 = undefined;
+    const flags_str = proc.flags.format(&flags_buf);
+    if (!std.mem.eql(u8, flags_str, "(none)")) {
+        try w.writeAll(flags_str);
+        try w.writeByte(' ');
+    }
+
+    try w.writeAll("procedure ");
+    try w.writeAll(proc.name);
+
+    // Arguments — first num_args local variables are the parameters
+    try w.writeByte('(');
+    for (0..proc.num_args) |a| {
+        if (a > 0) try w.writeAll(", ");
+        const arg_var = pr.getProcVar(proc_index, a);
+        try w.writeAll(arg_var.name);
+    }
+    try w.writeByte(')');
+    try w.writeAll("\n```\n");
+
+    // Doc comment
+    if (try extractDocComment(allocator, text, proc.declared_line)) |doc_comment| {
+        try w.writeAll("\n");
+        try w.writeAll(doc_comment);
+        try w.writeAll("\n\n");
+    }
+
+    // Details line
+    if (proc.defined) {
+        if (proc.start_line) |start| {
+            if (proc.end_line) |end| {
+                try w.print("Lines {d}\u{2013}{d}", .{ start, end });
+            }
+        }
+    } else {
+        try w.writeAll("Forward declaration");
+    }
+
+    if (proc.num_refs > 0) {
+        if (proc.defined and proc.start_line != null) try w.writeAll(" \u{00b7} ");
+        try w.print("{d} reference{s}", .{ proc.num_refs, if (proc.num_refs != 1) "s" else "" });
+    }
+
+    return out.written();
+}
+
+/// Format hover markdown for a variable
+fn formatVarHover(allocator: std.mem.Allocator, v: parser.Variable, proc_name: ?[]const u8, pr: *const parser.ParseResult, text: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    const w = &out.writer;
+
+    // Code block header
+    try w.writeAll("```ssl\n");
+    try w.writeAll(v.var_type.name());
+    try w.writeAll(" variable ");
+    try w.writeAll(v.name);
+
+    // Array notation
+    if (v.array_len > 0) {
+        try w.print("[{d}]", .{v.array_len});
+    }
+
+    // Initial value
+    if (v.initialized) {
+        if (v.value) |val| {
+            switch (val) {
+                .int => |n| try w.print(" := {d}", .{n}),
+                .float => |f| try w.print(" := {d}", .{f}),
+                .string => |offset| {
+                    if (pr.getStringValue(offset)) |s| {
+                        try w.print(" := \"{s}\"", .{s});
+                    }
+                },
+            }
+        }
+    }
+
+    try w.writeAll("\n```\n");
+
+    // Doc comment
+    if (try extractDocComment(allocator, text, v.declared_line)) |doc_comment| {
+        try w.writeAll("\n");
+        try w.writeAll(doc_comment);
+        try w.writeAll("\n\n");
+    }
+
+    // Details
+    if (proc_name) |pn| {
+        try w.print("Local to `{s}`", .{pn});
+        if (v.num_refs > 0) try w.writeAll(" \u{00b7} ");
+    }
+
+    if (v.num_refs > 0) {
+        try w.print("{d} reference{s}", .{ v.num_refs, if (v.num_refs != 1) "s" else "" });
+    }
+
+    return out.written();
 }
 
 /// Entry point for LSP mode

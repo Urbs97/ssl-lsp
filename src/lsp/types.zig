@@ -45,6 +45,15 @@ pub const Location = struct {
     range: Range,
 };
 
+pub const MarkupContent = struct {
+    kind: []const u8 = "markdown",
+    value: []const u8,
+};
+
+pub const Hover = struct {
+    contents: MarkupContent,
+};
+
 /// Serialize an LSP Position to a json Value
 fn positionToJson(allocator: std.mem.Allocator, pos: Position) !std.json.Value {
     var obj = std.json.ObjectMap.init(allocator);
@@ -66,6 +75,20 @@ pub fn locationToJson(allocator: std.mem.Allocator, loc: Location) !std.json.Val
     var obj = std.json.ObjectMap.init(allocator);
     try obj.put("uri", .{ .string = loc.uri });
     try obj.put("range", try rangeToJson(allocator, loc.range));
+    return .{ .object = obj };
+}
+
+fn markupContentToJson(allocator: std.mem.Allocator, mc: MarkupContent) !std.json.Value {
+    var obj = std.json.ObjectMap.init(allocator);
+    try obj.put("kind", .{ .string = mc.kind });
+    try obj.put("value", .{ .string = mc.value });
+    return .{ .object = obj };
+}
+
+/// Serialize an LSP Hover to a json Value
+pub fn hoverToJson(allocator: std.mem.Allocator, hover: Hover) !std.json.Value {
+    var obj = std.json.ObjectMap.init(allocator);
+    try obj.put("contents", try markupContentToJson(allocator, hover.contents));
     return .{ .object = obj };
 }
 

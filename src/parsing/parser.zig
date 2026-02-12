@@ -179,6 +179,10 @@ pub const ParseResult = struct {
         return result;
     }
 
+    pub fn getStringValue(self: *const ParseResult, offset: u32) ?[]const u8 {
+        return extractName(self.stringspace, @intCast(offset));
+    }
+
     pub fn getProcVarRefs(_: *ParseResult, proc_index: usize, var_index: usize, allocator: std.mem.Allocator) ![]Reference {
         var raw: c.Variable = undefined;
         c.getProcVar(@intCast(proc_index), @intCast(var_index), &raw);
