@@ -10,10 +10,10 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
   - Document symbols (procedure/variable outline)
   - Go to definition (user-defined procedures and variables)
   - Find references (all usages of a procedure or variable)
+  - Hover information (signature, doc comments, line range, reference count)
 
 ### Planned
 - Go to definition for built-in opcodes
-- Hover information
 - Completion and signature help for built-in opcodes
 
 ## Requirements

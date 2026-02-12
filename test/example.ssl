@@ -49,7 +49,7 @@ procedure start begin
    call setup;
 end
 
-// Procedure with arguments
+/// Procedure with arguments
 procedure calculate_value(variable base, variable multiplier) begin
    variable result;
    result := base * multiplier;
