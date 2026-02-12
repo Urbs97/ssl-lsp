@@ -15,6 +15,7 @@ const definition = @import("methods/definition.zig");
 const references = @import("methods/references.zig");
 const hover = @import("methods/hover.zig");
 const completion = @import("methods/completion.zig");
+const signature_help = @import("methods/signature_help.zig");
 const builtins = @import("builtins.zig");
 
 const log = std.log.scoped(.server);
@@ -39,6 +40,7 @@ const routes = [_]Route{
     .{ .method = "textDocument/references", .handler = references.handle },
     .{ .method = "textDocument/hover", .handler = hover.handle },
     .{ .method = "textDocument/completion", .handler = completion.handle },
+    .{ .method = "textDocument/signatureHelp", .handler = signature_help.handle },
 };
 
 fn handleMessage(ctx: *Context, json_val: std.json.Value) !void {
@@ -135,5 +137,6 @@ test {
     _ = references;
     _ = hover;
     _ = completion;
+    _ = signature_help;
     _ = builtins;
 }

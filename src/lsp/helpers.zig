@@ -224,6 +224,138 @@ pub fn extractDocComment(allocator: std.mem.Allocator, text: []const u8, declare
     return out.written();
 }
 
+pub const CallContext = struct {
+    func_name: []const u8,
+    active_param: u32,
+};
+
+/// Convert (line, character) to an absolute byte offset in text.
+fn lineCharToOffset(text: []const u8, line: u32, character: u32) ?usize {
+    var current_line: u32 = 0;
+    var line_start: usize = 0;
+    for (text, 0..) |ch, idx| {
+        if (current_line == line) {
+            line_start = idx;
+            break;
+        }
+        if (ch == '\n') {
+            current_line += 1;
+        }
+    } else {
+        if (current_line != line) return null;
+        line_start = text.len;
+    }
+    const offset = line_start + character;
+    if (offset > text.len) return null;
+    return offset;
+}
+
+/// Determine the function name and active parameter index at a cursor position inside a call.
+/// Returns null if the cursor is not inside a function call's parentheses.
+pub fn getCallContext(text: []const u8, line: u32, character: u32) ?CallContext {
+    const cursor = lineCharToOffset(text, line, character) orelse return null;
+
+    var depth: u32 = 0;
+    var comma_count: u32 = 0;
+    var i: usize = cursor;
+
+    while (i > 0) {
+        i -= 1;
+        const ch = text[i];
+
+        // Skip string literals (scan backwards past opening quote, handling escapes)
+        if (ch == '"') {
+            if (i > 0) {
+                i -= 1;
+                while (true) {
+                    // Scan backwards for the next quote
+                    while (i > 0 and text[i] != '"') : (i -= 1) {}
+                    // Count preceding backslashes
+                    var bs: usize = 0;
+                    while (bs < i and text[i - 1 - bs] == '\\') : (bs += 1) {}
+                    if (bs % 2 == 0) break; // Even backslashes → unescaped quote → done
+                    // Odd backslashes → escaped quote → keep scanning
+                    if (i == 0) break;
+                    i -= 1;
+                }
+            }
+            continue;
+        }
+
+        if (ch == ')') {
+            depth += 1;
+        } else if (ch == '(') {
+            if (depth > 0) {
+                depth -= 1;
+            } else {
+                // Found the target opening paren — extract function name
+                var name_end = i;
+                // Skip whitespace before '('
+                while (name_end > 0 and (text[name_end - 1] == ' ' or text[name_end - 1] == '\t')) {
+                    name_end -= 1;
+                }
+                if (name_end == 0 or !isIdentChar(text[name_end - 1])) return null;
+
+                var name_start = name_end;
+                while (name_start > 0 and isIdentChar(text[name_start - 1])) {
+                    name_start -= 1;
+                }
+
+                if (name_start == name_end) return null;
+
+                return .{
+                    .func_name = text[name_start..name_end],
+                    .active_param = comma_count,
+                };
+            }
+        } else if (ch == ',' and depth == 0) {
+            comma_count += 1;
+        }
+    }
+
+    return null;
+}
+
+/// Extract individual parameter strings from an opcode signature like "int random(int min, int max)".
+/// Returns null for property-style opcodes (no parentheses).
+pub fn parseSignatureParams(allocator: std.mem.Allocator, signature: []const u8) ?[]const []const u8 {
+    const open = std.mem.indexOfScalar(u8, signature, '(') orelse return null;
+    const close = std.mem.lastIndexOfScalar(u8, signature, ')') orelse return null;
+    if (close <= open + 1) {
+        // Empty parens like "void func()" — zero params
+        const empty = allocator.alloc([]const u8, 0) catch return null;
+        return empty;
+    }
+
+    const inner = signature[open + 1 .. close];
+
+    // Count commas at depth 0 to determine number of params
+    var count: usize = 1;
+    var d: u32 = 0;
+    for (inner) |ch| {
+        if (ch == '(') d += 1 else if (ch == ')') {
+            d -|= 1;
+        } else if (ch == ',' and d == 0) count += 1;
+    }
+
+    const params = allocator.alloc([]const u8, count) catch return null;
+    var idx: usize = 0;
+    d = 0;
+    var start: usize = 0;
+    for (inner, 0..) |ch, ci| {
+        if (ch == '(') d += 1 else if (ch == ')') {
+            d -|= 1;
+        } else if (ch == ',' and d == 0) {
+            params[idx] = std.mem.trim(u8, inner[start..ci], " \t");
+            idx += 1;
+            start = ci + 1;
+        }
+    }
+    params[idx] = std.mem.trim(u8, inner[start..], " \t");
+
+    return params;
+}
+
 /// Format hover markdown for a procedure
 pub fn formatProcHover(allocator: std.mem.Allocator, proc: parser.Procedure, proc_index: usize, pr: *const parser.ParseResult, text: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
@@ -330,4 +462,86 @@ pub fn formatVarHover(allocator: std.mem.Allocator, v: parser.Variable, proc_nam
     }
 
     return out.written();
+}
+
+test "getCallContext basic" {
+    const text = "random(1, 2)";
+    // Cursor after opening paren: random(|
+    const ctx1 = getCallContext(text, 0, 7).?;
+    try std.testing.expectEqualStrings("random", ctx1.func_name);
+    try std.testing.expectEqual(@as(u32, 0), ctx1.active_param);
+
+    // Cursor after comma: random(1, |
+    const ctx2 = getCallContext(text, 0, 10).?;
+    try std.testing.expectEqualStrings("random", ctx2.func_name);
+    try std.testing.expectEqual(@as(u32, 1), ctx2.active_param);
+}
+
+test "getCallContext nested parens" {
+    const text = "foo(bar(1, 2), )";
+    // Cursor at position 15 → inside foo's second param: foo(bar(1, 2), |)
+    const ctx = getCallContext(text, 0, 15).?;
+    try std.testing.expectEqualStrings("foo", ctx.func_name);
+    try std.testing.expectEqual(@as(u32, 1), ctx.active_param);
+}
+
+test "getCallContext string with comma" {
+    const text =
+        \\foo("a,b", )
+    ;
+    // Cursor at position 11 → second param: foo("a,b", |)
+    const ctx = getCallContext(text, 0, 11).?;
+    try std.testing.expectEqualStrings("foo", ctx.func_name);
+    try std.testing.expectEqual(@as(u32, 1), ctx.active_param);
+}
+
+test "getCallContext escaped quote in string" {
+    const text =
+        \\foo("a\"b", x)
+    ;
+    // Cursor at position 13 → second param: foo("a\"b", x|)
+    const ctx = getCallContext(text, 0, 13).?;
+    try std.testing.expectEqualStrings("foo", ctx.func_name);
+    try std.testing.expectEqual(@as(u32, 1), ctx.active_param);
+}
+
+test "getCallContext escaped backslash before quote" {
+    const text =
+        \\foo("a\\", x)
+    ;
+    // Cursor at position 12 → second param: foo("a\\", x|)
+    const ctx = getCallContext(text, 0, 12).?;
+    try std.testing.expectEqualStrings("foo", ctx.func_name);
+    try std.testing.expectEqual(@as(u32, 1), ctx.active_param);
+}
+
+test "getCallContext multiline" {
+    const text = "foo(\n  1,\n  2)";
+    // Cursor on line 2, character 2 → second param
+    const ctx = getCallContext(text, 2, 2).?;
+    try std.testing.expectEqualStrings("foo", ctx.func_name);
+    try std.testing.expectEqual(@as(u32, 1), ctx.active_param);
+}
+
+test "getCallContext no paren returns null" {
+    const text = "hello world";
+    try std.testing.expectEqual(@as(?CallContext, null), getCallContext(text, 0, 5));
+}
+
+test "parseSignatureParams basic" {
+    const params = parseSignatureParams(std.testing.allocator, "int random(int min, int max)").?;
+    defer std.testing.allocator.free(params);
+    try std.testing.expectEqual(@as(usize, 2), params.len);
+    try std.testing.expectEqualStrings("int min", params[0]);
+    try std.testing.expectEqualStrings("int max", params[1]);
+}
+
+test "parseSignatureParams no paren property" {
+    try std.testing.expectEqual(@as(?[]const []const u8, null), parseSignatureParams(std.testing.allocator, "int cur_hp"));
+}
+
+test "parseSignatureParams zero args" {
+    const params = parseSignatureParams(std.testing.allocator, "void cleanup()").?;
+    defer std.testing.allocator.free(params);
+    try std.testing.expectEqual(@as(usize, 0), params.len);
 }
