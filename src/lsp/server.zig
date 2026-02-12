@@ -146,6 +146,10 @@ const Server = struct {
             if (id) |req_id| {
                 try self.handleDefinition(allocator, req_id, params);
             }
+        } else if (std.mem.eql(u8, method, "textDocument/references")) {
+            if (id) |req_id| {
+                try self.handleReferences(allocator, req_id, params);
+            }
         } else {
             // Unknown method - send MethodNotFound for requests (those with id)
             if (id) |req_id| {
@@ -159,6 +163,7 @@ const Server = struct {
         try capabilities.put("textDocumentSync", .{ .integer = 1 });
         try capabilities.put("documentSymbolProvider", .{ .bool = true });
         try capabilities.put("definitionProvider", .{ .bool = true });
+        try capabilities.put("referencesProvider", .{ .bool = true });
 
         var result = std.json.ObjectMap.init(allocator);
         try result.put("capabilities", .{ .object = capabilities });
@@ -537,6 +542,163 @@ const Server = struct {
         // No match found
         try self.sendResponse(allocator, id, .null);
     }
+
+    fn handleReferences(self: *Server, allocator: std.mem.Allocator, id: std.json.Value, params: std.json.Value) !void {
+        const td = getObject(params, "textDocument") orelse {
+            log.err("references: missing 'textDocument'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+        const uri = getString(td, "uri") orelse {
+            log.err("references: missing 'uri'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+        const position = getObject(params, "position") orelse {
+            log.err("references: missing 'position'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+        const line = getInteger(position, "line") orelse {
+            log.err("references: missing 'position.line'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+        const character = getInteger(position, "character") orelse {
+            log.err("references: missing 'position.character'", .{});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        const context = getObject(params, "context");
+        const include_declaration = if (context) |ctx| getBool(ctx, "includeDeclaration") orelse false else false;
+
+        const doc = self.documents.getPtr(uri) orelse {
+            log.debug("references: unknown document {s}", .{uri});
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        var pr = doc.parse_result orelse {
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        const word = getWordAtPosition(doc.text, @intCast(line), @intCast(character)) orelse {
+            try self.sendResponse(allocator, id, .{ .array = std.json.Array.init(allocator) });
+            return;
+        };
+
+        var locations = std.json.Array.init(allocator);
+
+        // Search procedures
+        for (0..pr.num_procs) |i| {
+            const proc = pr.getProc(i);
+            if (std.mem.eql(u8, proc.name, word)) {
+                if (include_declaration) {
+                    const decl_line: u32 = if (proc.declared_line > 0) proc.declared_line - 1 else 0;
+                    const loc = types.Location{
+                        .uri = uri,
+                        .range = .{
+                            .start = .{ .line = decl_line, .character = 0 },
+                            .end = .{ .line = decl_line, .character = 0 },
+                        },
+                    };
+                    try locations.append(try types.locationToJson(allocator, loc));
+                }
+
+                const refs = try pr.getProcRefs(i, allocator);
+                for (refs) |ref| {
+                    const ref_line: u32 = if (ref.line > 0) ref.line - 1 else 0;
+                    const loc = types.Location{
+                        .uri = uri,
+                        .range = .{
+                            .start = .{ .line = ref_line, .character = 0 },
+                            .end = .{ .line = ref_line, .character = 0 },
+                        },
+                    };
+                    try locations.append(try types.locationToJson(allocator, loc));
+                }
+
+                try self.sendResponse(allocator, id, .{ .array = locations });
+                return;
+            }
+        }
+
+        // Search global variables
+        for (0..pr.num_vars) |i| {
+            const v = pr.getVar(i);
+            if (std.mem.eql(u8, v.name, word)) {
+                if (include_declaration) {
+                    const var_line: u32 = if (v.declared_line > 0) v.declared_line - 1 else 0;
+                    const loc = types.Location{
+                        .uri = uri,
+                        .range = .{
+                            .start = .{ .line = var_line, .character = 0 },
+                            .end = .{ .line = var_line, .character = 0 },
+                        },
+                    };
+                    try locations.append(try types.locationToJson(allocator, loc));
+                }
+
+                const refs = try pr.getVarRefs(i, allocator);
+                for (refs) |ref| {
+                    const ref_line: u32 = if (ref.line > 0) ref.line - 1 else 0;
+                    const loc = types.Location{
+                        .uri = uri,
+                        .range = .{
+                            .start = .{ .line = ref_line, .character = 0 },
+                            .end = .{ .line = ref_line, .character = 0 },
+                        },
+                    };
+                    try locations.append(try types.locationToJson(allocator, loc));
+                }
+
+                try self.sendResponse(allocator, id, .{ .array = locations });
+                return;
+            }
+        }
+
+        // Search local variables in each procedure
+        for (0..pr.num_procs) |pi| {
+            const proc = pr.getProc(pi);
+            for (0..proc.num_local_vars) |vi| {
+                const local_var = pr.getProcVar(pi, vi);
+                if (std.mem.eql(u8, local_var.name, word)) {
+                    if (include_declaration) {
+                        const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
+                        const loc = types.Location{
+                            .uri = uri,
+                            .range = .{
+                                .start = .{ .line = var_line, .character = 0 },
+                                .end = .{ .line = var_line, .character = 0 },
+                            },
+                        };
+                        try locations.append(try types.locationToJson(allocator, loc));
+                    }
+
+                    const refs = try pr.getProcVarRefs(pi, vi, allocator);
+                    for (refs) |ref| {
+                        const ref_line: u32 = if (ref.line > 0) ref.line - 1 else 0;
+                        const loc = types.Location{
+                            .uri = uri,
+                            .range = .{
+                                .start = .{ .line = ref_line, .character = 0 },
+                                .end = .{ .line = ref_line, .character = 0 },
+                            },
+                        };
+                        try locations.append(try types.locationToJson(allocator, loc));
+                    }
+
+                    try self.sendResponse(allocator, id, .{ .array = locations });
+                    return;
+                }
+            }
+        }
+
+        // No match found
+        try self.sendResponse(allocator, id, .{ .array = locations });
+    }
 };
 
 // JSON helper functions
@@ -566,6 +728,17 @@ fn getInteger(val: std.json.Value, key: []const u8) ?i64 {
     };
     return switch (v) {
         .integer => |n| n,
+        else => null,
+    };
+}
+
+fn getBool(val: std.json.Value, key: []const u8) ?bool {
+    const v = switch (val) {
+        .object => |obj| obj.get(key) orelse return null,
+        else => return null,
+    };
+    return switch (v) {
+        .bool => |b| b,
         else => null,
     };
 }
