@@ -8,28 +8,13 @@ const log = std.log.scoped(.server);
 pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, params: std.json.Value) anyerror!void {
     const req_id = id orelse return;
 
-    const td = helpers.getObject(params, "textDocument") orelse {
-        log.err("definition: missing 'textDocument'", .{});
+    const uri = helpers.getTextDocumentUri(params) orelse {
+        log.err("definition: missing textDocument.uri", .{});
         try ctx.sendResponse(allocator, req_id, .null);
         return;
     };
-    const uri = helpers.getString(td, "uri") orelse {
-        log.err("definition: missing 'uri'", .{});
-        try ctx.sendResponse(allocator, req_id, .null);
-        return;
-    };
-    const position = helpers.getObject(params, "position") orelse {
-        log.err("definition: missing 'position'", .{});
-        try ctx.sendResponse(allocator, req_id, .null);
-        return;
-    };
-    const line = helpers.getInteger(position, "line") orelse {
-        log.err("definition: missing 'position.line'", .{});
-        try ctx.sendResponse(allocator, req_id, .null);
-        return;
-    };
-    const character = helpers.getInteger(position, "character") orelse {
-        log.err("definition: missing 'position.character'", .{});
+    const pos = helpers.getPosition(params) orelse {
+        log.err("definition: missing position params", .{});
         try ctx.sendResponse(allocator, req_id, .null);
         return;
     };
@@ -45,7 +30,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         return;
     };
 
-    const word = helpers.getWordAtPosition(doc.text, @intCast(line), @intCast(character)) orelse {
+    const word = helpers.getWordAtPosition(doc.text, @intCast(pos.line), @intCast(pos.character)) orelse {
         try ctx.sendResponse(allocator, req_id, .null);
         return;
     };

@@ -43,6 +43,22 @@ pub fn getBool(val: std.json.Value, key: []const u8) ?bool {
     };
 }
 
+/// Extract textDocument.uri from params in one step.
+pub fn getTextDocumentUri(params: std.json.Value) ?[]const u8 {
+    const td = getObject(params, "textDocument") orelse return null;
+    return getString(td, "uri");
+}
+
+pub const PositionParams = struct { line: i64, character: i64 };
+
+/// Extract position.line and position.character from params in one step.
+pub fn getPosition(params: std.json.Value) ?PositionParams {
+    const pos = getObject(params, "position") orelse return null;
+    const line = getInteger(pos, "line") orelse return null;
+    const character = getInteger(pos, "character") orelse return null;
+    return .{ .line = line, .character = character };
+}
+
 pub fn getArray(val: std.json.Value, key: []const u8) ?[]std.json.Value {
     const v = switch (val) {
         .object => |obj| obj.get(key) orelse return null,

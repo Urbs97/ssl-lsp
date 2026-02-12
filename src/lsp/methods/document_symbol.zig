@@ -8,13 +8,8 @@ const log = std.log.scoped(.server);
 pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, params: std.json.Value) anyerror!void {
     const req_id = id orelse return;
 
-    const td = helpers.getObject(params, "textDocument") orelse {
-        log.err("documentSymbol: missing 'textDocument'", .{});
-        try ctx.sendResponse(allocator, req_id, .{ .array = std.json.Array.init(allocator) });
-        return;
-    };
-    const uri = helpers.getString(td, "uri") orelse {
-        log.err("documentSymbol: missing 'uri'", .{});
+    const uri = helpers.getTextDocumentUri(params) orelse {
+        log.err("documentSymbol: missing textDocument.uri", .{});
         try ctx.sendResponse(allocator, req_id, .{ .array = std.json.Array.init(allocator) });
         return;
     };

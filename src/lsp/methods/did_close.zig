@@ -5,12 +5,8 @@ const helpers = @import("../helpers.zig");
 const log = std.log.scoped(.server);
 
 pub fn handle(ctx: *Context, allocator: std.mem.Allocator, _: ?std.json.Value, params: std.json.Value) anyerror!void {
-    const td = helpers.getObject(params, "textDocument") orelse {
-        log.err("didClose: missing 'textDocument'", .{});
-        return;
-    };
-    const uri = helpers.getString(td, "uri") orelse {
-        log.err("didClose: missing 'uri'", .{});
+    const uri = helpers.getTextDocumentUri(params) orelse {
+        log.err("didClose: missing textDocument.uri", .{});
         return;
     };
 
