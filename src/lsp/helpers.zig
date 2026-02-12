@@ -465,10 +465,11 @@ pub fn formatVarHover(allocator: std.mem.Allocator, v: parser.Variable, proc_nam
 }
 
 /// Construct a file:// URI from an absolute filesystem path.
+/// Percent-encodes characters that are not valid in URI paths (spaces, #, etc.).
 pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     try out.writer.writeAll("file://");
-    try out.writer.writeAll(path);
+    try (std.Uri.Component{ .raw = path }).formatPath(&out.writer);
     return out.written();
 }
 

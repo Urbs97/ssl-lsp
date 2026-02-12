@@ -13,6 +13,7 @@ pub const Define = struct {
 pub const DefineSet = struct {
     arena: std.heap.ArenaAllocator,
     defines: std.StringHashMapUnmanaged(Define),
+    include_hash: u64 = 0, // hash of #include lines for cache invalidation
 
     pub fn init(child_allocator: std.mem.Allocator) DefineSet {
         return .{
@@ -22,8 +23,8 @@ pub const DefineSet = struct {
     }
 
     pub fn deinit(self: *DefineSet) void {
-        // The hash map internals were allocated with the arena's child allocator
-        // via put(), so we need to free those separately.
+        // Free hash map metadata (buckets, etc.) allocated via the arena allocator,
+        // then release all arena memory.
         self.defines.deinit(self.arena.allocator());
         self.arena.deinit();
     }
@@ -40,29 +41,49 @@ pub const DefineSet = struct {
 /// Extract all #define macros from a document and its #include'd headers.
 /// The document_text is scanned for #include "path" directives, and each
 /// included header is read from disk relative to include_dir.
-pub fn extractDefines(child_allocator: std.mem.Allocator, document_text: []const u8, include_dir: []const u8) !DefineSet {
+/// If `previous` is provided and the set of #include lines hasn't changed,
+/// header defines are copied from the previous set to avoid re-reading disk.
+pub fn extractDefines(child_allocator: std.mem.Allocator, document_text: []const u8, include_dir: []const u8, previous: ?*const DefineSet) !DefineSet {
     var result = DefineSet.init(child_allocator);
     errdefer result.deinit();
 
     const allocator = result.arena.allocator();
+    result.include_hash = computeIncludeHash(document_text);
 
-    // Track visited files to prevent cycles
+    // If includes haven't changed, copy header defines from previous and only re-parse document
+    if (previous) |prev| {
+        if (prev.include_hash == result.include_hash) {
+            // Copy header defines (file.len != 0) from previous set
+            var it = prev.defines.iterator();
+            while (it.next()) |entry| {
+                if (entry.value_ptr.file.len != 0) {
+                    const copied = try copyDefine(allocator, entry.value_ptr.*);
+                    try result.defines.put(allocator, copied.name, copied);
+                }
+            }
+            // Parse only document-local defines (skip includes)
+            try parseDefinesFromText(allocator, &result.defines, document_text, "", null, include_dir);
+            return result;
+        }
+    }
+
+    // Full extraction: parse document and follow includes
     var visited = std.StringHashMapUnmanaged(void){};
     defer visited.deinit(allocator);
 
-    // Parse defines from the document itself
-    try parseDefinesFromText(allocator, &result.defines, document_text, "current file", &visited, include_dir);
+    try parseDefinesFromText(allocator, &result.defines, document_text, "", &visited, include_dir);
 
     return result;
 }
 
 /// Parse #define directives from text content, recursively following #include directives.
+/// When `visited` is null, #include directives are skipped (used for document-only parsing).
 fn parseDefinesFromText(
     allocator: std.mem.Allocator,
     defines: *std.StringHashMapUnmanaged(Define),
     text: []const u8,
     filename: []const u8,
-    visited: *std.StringHashMapUnmanaged(void),
+    visited: ?*std.StringHashMapUnmanaged(void),
     include_dir: []const u8,
 ) ParseError!void {
     var line_num: u32 = 0;
@@ -86,11 +107,13 @@ fn parseDefinesFromText(
         // Handle #include "path"
         if (std.mem.startsWith(u8, trimmed, "#include")) {
             comment_lines.clearRetainingCapacity();
-            const rest = std.mem.trimLeft(u8, trimmed[8..], " \t");
-            if (rest.len > 0 and rest[0] == '"') {
-                if (std.mem.indexOfScalarPos(u8, rest, 1, '"')) |end_quote| {
-                    const inc_path = rest[1..end_quote];
-                    try processInclude(allocator, defines, inc_path, visited, include_dir);
+            if (visited) |v| {
+                const rest = std.mem.trimLeft(u8, trimmed[8..], " \t");
+                if (rest.len > 0 and rest[0] == '"') {
+                    if (std.mem.indexOfScalarPos(u8, rest, 1, '"')) |end_quote| {
+                        const inc_path = rest[1..end_quote];
+                        try processInclude(allocator, defines, inc_path, v, include_dir);
+                    }
                 }
             }
             continue;
@@ -202,6 +225,45 @@ fn parseDefinesFromText(
 
 const ParseError = std.mem.Allocator.Error || std.fmt.BufPrintError || std.Io.Writer.Error;
 
+/// Hash all #include lines in the text for cache invalidation.
+fn computeIncludeHash(text: []const u8) u64 {
+    var hasher = std.hash.Wyhash.init(0);
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    while (line_iter.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+        const trimmed = std.mem.trimLeft(u8, line, " \t");
+        if (std.mem.startsWith(u8, trimmed, "#include")) {
+            hasher.update(trimmed);
+            hasher.update("\n");
+        }
+    }
+    return hasher.final();
+}
+
+/// Deep-copy a Define, duplicating all string fields into the given allocator.
+fn copyDefine(allocator: std.mem.Allocator, def: Define) !Define {
+    const name = try allocator.dupe(u8, def.name);
+    const body = try allocator.dupe(u8, def.body);
+    const file = try allocator.dupe(u8, def.file);
+    const doc_comment = if (def.doc_comment) |dc| try allocator.dupe(u8, dc) else null;
+    var params: ?[]const []const u8 = null;
+    if (def.params) |src_params| {
+        const new_params = try allocator.alloc([]const u8, src_params.len);
+        for (src_params, 0..) |p, i| {
+            new_params[i] = try allocator.dupe(u8, p);
+        }
+        params = new_params;
+    }
+    return .{
+        .name = name,
+        .params = params,
+        .body = body,
+        .file = file,
+        .line = def.line,
+        .doc_comment = doc_comment,
+    };
+}
+
 /// Process a single #include directive by reading the file and parsing its defines.
 fn processInclude(
     allocator: std.mem.Allocator,
@@ -309,7 +371,7 @@ pub fn formatHover(allocator: std.mem.Allocator, def: Define) ![]const u8 {
         try w.writeByte('\n');
     }
 
-    try w.print("\nDefined in {s}:{d}", .{ std.fs.path.basename(def.file), def.line });
+    try w.print("\nDefined in {s}:{d}", .{ if (def.file.len == 0) "current file" else std.fs.path.basename(def.file), def.line });
 
     return out.written();
 }
@@ -319,7 +381,7 @@ pub fn formatHover(allocator: std.mem.Allocator, def: Define) ![]const u8 {
 test "parse simple object-like define" {
     const allocator = std.testing.allocator;
     const text = "#define FOO 42\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("FOO").?;
@@ -331,7 +393,7 @@ test "parse simple object-like define" {
 test "parse function-like define" {
     const allocator = std.testing.allocator;
     const text = "#define CALC(x, y) ((x) + (y))\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("CALC").?;
@@ -346,7 +408,7 @@ test "parse function-like define" {
 test "space before paren is object-like" {
     const allocator = std.testing.allocator;
     const text = "#define create_array_map (create_array(-1, 0))\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("create_array_map").?;
@@ -361,7 +423,7 @@ test "multi-line define with backslash continuation" {
         \\  bar(x)
         \\
     ;
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("MULTI").?;
@@ -374,7 +436,7 @@ test "multi-line define with backslash continuation" {
 test "skip include guards" {
     const allocator = std.testing.allocator;
     const text = "#ifndef SFALL_H\n#define SFALL_H\n#define FOO 1\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     try std.testing.expect(defs.lookup("SFALL_H") == null);
@@ -389,7 +451,7 @@ test "doc comment extraction" {
         \\#define FOO 42
         \\
     ;
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("FOO").?;
@@ -399,7 +461,7 @@ test "doc comment extraction" {
 test "define with no params but parens in body" {
     const allocator = std.testing.allocator;
     const text = "#define map_first_run metarule(METARULE_TEST_FIRSTRUN, 0)\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("map_first_run").?;
@@ -410,7 +472,7 @@ test "define with no params but parens in body" {
 test "function-like with zero args" {
     const allocator = std.testing.allocator;
     const text = "#define ZERO() (0)\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("ZERO").?;
@@ -422,7 +484,7 @@ test "function-like with zero args" {
 test "later defines override earlier" {
     const allocator = std.testing.allocator;
     const text = "#define FOO 1\n#define FOO 2\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("FOO").?;
@@ -434,7 +496,7 @@ test "formatDetail object-like" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const text = "#define WORLDMAP (0x1)\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("WORLDMAP").?;
@@ -447,7 +509,7 @@ test "formatDetail function-like" {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const text = "#define CALC(x, y) ((x) + (y))\n";
-    var defs = try extractDefines(allocator, text, ".");
+    var defs = try extractDefines(allocator, text, ".", null);
     defer defs.deinit();
 
     const def = defs.lookup("CALC").?;
@@ -458,7 +520,7 @@ test "formatDetail function-like" {
 test "parse defines from real headers" {
     const allocator = std.testing.allocator;
     const text = "#include \"headers/sfall.h\"\n#include \"headers/define_lite.h\"\n#include \"headers/command_lite.h\"\n";
-    var defs = try extractDefines(allocator, text, "test");
+    var defs = try extractDefines(allocator, text, "test", null);
     defer defs.deinit();
 
     // Should find constants from sfall.h
@@ -498,4 +560,46 @@ test "parse defines from real headers" {
 
     // Should have a reasonable number of defines
     try std.testing.expect(defs.count() > 50);
+}
+
+test "cache reuses header defines when includes unchanged" {
+    const allocator = std.testing.allocator;
+    const text1 = "#include \"headers/sfall.h\"\n#define LOCAL1 1\n";
+    var defs1 = try extractDefines(allocator, text1, "test", null);
+    defer defs1.deinit();
+
+    // Verify initial state
+    try std.testing.expect(defs1.lookup("WORLDMAP") != null);
+    try std.testing.expect(defs1.lookup("LOCAL1") != null);
+    try std.testing.expect(defs1.include_hash != 0);
+
+    // Same includes, different local define — should reuse cached header defines
+    const text2 = "#include \"headers/sfall.h\"\n#define LOCAL2 2\n";
+    var defs2 = try extractDefines(allocator, text2, "test", &defs1);
+    defer defs2.deinit();
+
+    // Header defines should still be present (copied from cache)
+    try std.testing.expect(defs2.lookup("WORLDMAP") != null);
+    // Old local define should be gone, new one present
+    try std.testing.expect(defs2.lookup("LOCAL1") == null);
+    try std.testing.expect(defs2.lookup("LOCAL2") != null);
+    // Include hashes should match
+    try std.testing.expectEqual(defs1.include_hash, defs2.include_hash);
+}
+
+test "cache invalidated when includes change" {
+    const allocator = std.testing.allocator;
+    const text1 = "#include \"headers/sfall.h\"\n#define LOCAL1 1\n";
+    var defs1 = try extractDefines(allocator, text1, "test", null);
+    defer defs1.deinit();
+
+    // Different includes — cache should be invalidated
+    const text2 = "#include \"headers/define_lite.h\"\n#define LOCAL1 1\n";
+    var defs2 = try extractDefines(allocator, text2, "test", &defs1);
+    defer defs2.deinit();
+
+    // Include hashes should differ
+    try std.testing.expect(defs1.include_hash != defs2.include_hash);
+    // Should have defines from the new header
+    try std.testing.expect(defs2.lookup("start_proc") != null);
 }

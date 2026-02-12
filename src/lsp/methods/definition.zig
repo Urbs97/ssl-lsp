@@ -125,7 +125,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     // Search #define macros
     if (doc.defines) |*defs| {
         if (defs.lookup(word)) |def| {
-            const def_uri = if (std.mem.eql(u8, def.file, "current file"))
+            const def_uri = if (def.file.len == 0)
                 uri
             else
                 try helpers.pathToUri(allocator, def.file);
@@ -158,6 +158,8 @@ fn getIncludePath(text: []const u8, line: u32) ?[]const u8 {
         }
         if (ch == '\n') current_line += 1;
     } else {
+        // for-else: the else branch runs only if the loop completed without breaking
+        // (i.e., the target line is the last line with no trailing newline)
         if (current_line != line) return null;
         line_start = text.len;
     }
