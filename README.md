@@ -82,14 +82,28 @@ The project builds [sslc](https://github.com/sfall-team/sslc) from source as a s
 
 ```
 src/
-├── main.zig           # Entry point — dispatches --lint / --stdio
+├── main.zig              # Entry point — dispatches --lint / --stdio
 ├── parsing/
-│   ├── parser.zig     # C FFI bindings to sslc
-│   └── errors.zig     # Diagnostic parsing
+│   ├── parser.zig        # C FFI bindings to sslc
+│   └── errors.zig        # Diagnostic parsing
 └── lsp/
-    ├── server.zig     # LSP message loop
-    ├── transport.zig  # JSON-RPC framing
-    └── types.zig      # LSP protocol types
+    ├── server.zig        # LSP message loop and method routing
+    ├── context.zig       # Server state (open documents, allocators)
+    ├── helpers.zig       # Parameter extraction and formatting helpers
+    ├── transport.zig     # JSON-RPC framing
+    ├── types.zig         # LSP protocol types
+    └── methods/          # Individual RPC method handlers
+        ├── initialize.zig
+        ├── initialized.zig
+        ├── shutdown.zig
+        ├── exit.zig
+        ├── did_open.zig
+        ├── did_change.zig
+        ├── did_close.zig
+        ├── document_symbol.zig
+        ├── definition.zig
+        ├── references.zig
+        └── hover.zig
 ```
 
 ## Testing
