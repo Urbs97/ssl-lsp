@@ -324,7 +324,7 @@ const Server = struct {
                     .message = err.message,
                 };
 
-                const diag_json = try types.diagnosticToJson(allocator, diag);
+                const diag_json = try diag.toJson(allocator);
                 try diag_array.append(diag_json);
             }
         }
@@ -419,7 +419,7 @@ const Server = struct {
                 .selection_range = selection_range,
                 .children = children,
             };
-            try symbols.append(try types.documentSymbolToJson(allocator, sym));
+            try symbols.append(try sym.toJson(allocator));
         }
 
         // Build global variable symbols
@@ -438,7 +438,7 @@ const Server = struct {
                 .range = var_range,
                 .selection_range = var_range,
             };
-            try symbols.append(try types.documentSymbolToJson(allocator, sym));
+            try symbols.append(try sym.toJson(allocator));
         }
 
         try self.sendResponse(allocator, id, .{ .array = symbols });
@@ -500,7 +500,7 @@ const Server = struct {
                         .end = .{ .line = decl_line, .character = name_len },
                     },
                 };
-                try self.sendResponse(allocator, id, try types.locationToJson(allocator, loc));
+                try self.sendResponse(allocator, id, try loc.toJson(allocator));
                 return;
             }
         }
@@ -518,7 +518,7 @@ const Server = struct {
                         .end = .{ .line = var_line, .character = name_len },
                     },
                 };
-                try self.sendResponse(allocator, id, try types.locationToJson(allocator, loc));
+                try self.sendResponse(allocator, id, try loc.toJson(allocator));
                 return;
             }
         }
@@ -538,7 +538,7 @@ const Server = struct {
                             .end = .{ .line = var_line, .character = name_len },
                         },
                     };
-                    try self.sendResponse(allocator, id, try types.locationToJson(allocator, loc));
+                    try self.sendResponse(allocator, id, try loc.toJson(allocator));
                     return;
                 }
             }
@@ -609,7 +609,7 @@ const Server = struct {
                             .end = .{ .line = decl_line, .character = 0 },
                         },
                     };
-                    try locations.append(try types.locationToJson(allocator, loc));
+                    try locations.append(try loc.toJson(allocator));
                 }
 
                 const refs = try pr.getProcRefs(i, allocator);
@@ -622,7 +622,7 @@ const Server = struct {
                             .end = .{ .line = ref_line, .character = 0 },
                         },
                     };
-                    try locations.append(try types.locationToJson(allocator, loc));
+                    try locations.append(try loc.toJson(allocator));
                 }
 
                 try self.sendResponse(allocator, id, .{ .array = locations });
@@ -643,7 +643,7 @@ const Server = struct {
                             .end = .{ .line = var_line, .character = 0 },
                         },
                     };
-                    try locations.append(try types.locationToJson(allocator, loc));
+                    try locations.append(try loc.toJson(allocator));
                 }
 
                 const refs = try pr.getVarRefs(i, allocator);
@@ -656,7 +656,7 @@ const Server = struct {
                             .end = .{ .line = ref_line, .character = 0 },
                         },
                     };
-                    try locations.append(try types.locationToJson(allocator, loc));
+                    try locations.append(try loc.toJson(allocator));
                 }
 
                 try self.sendResponse(allocator, id, .{ .array = locations });
@@ -679,7 +679,7 @@ const Server = struct {
                                 .end = .{ .line = var_line, .character = 0 },
                             },
                         };
-                        try locations.append(try types.locationToJson(allocator, loc));
+                        try locations.append(try loc.toJson(allocator));
                     }
 
                     const refs = try pr.getProcVarRefs(pi, vi, allocator);
@@ -692,7 +692,7 @@ const Server = struct {
                                 .end = .{ .line = ref_line, .character = 0 },
                             },
                         };
-                        try locations.append(try types.locationToJson(allocator, loc));
+                        try locations.append(try loc.toJson(allocator));
                     }
 
                     try self.sendResponse(allocator, id, .{ .array = locations });
@@ -754,7 +754,7 @@ const Server = struct {
             if (std.mem.eql(u8, proc.name, word)) {
                 const md = try formatProcHover(allocator, proc, i, &pr, doc.text);
                 const hover = types.Hover{ .contents = .{ .value = md } };
-                try self.sendResponse(allocator, id, try types.hoverToJson(allocator, hover));
+                try self.sendResponse(allocator, id, try hover.toJson(allocator));
                 return;
             }
         }
@@ -765,7 +765,7 @@ const Server = struct {
             if (std.mem.eql(u8, v.name, word)) {
                 const md = try formatVarHover(allocator, v, null, &pr, doc.text);
                 const hover = types.Hover{ .contents = .{ .value = md } };
-                try self.sendResponse(allocator, id, try types.hoverToJson(allocator, hover));
+                try self.sendResponse(allocator, id, try hover.toJson(allocator));
                 return;
             }
         }
@@ -778,7 +778,7 @@ const Server = struct {
                 if (std.mem.eql(u8, local_var.name, word)) {
                     const md = try formatVarHover(allocator, local_var, proc.name, &pr, doc.text);
                     const hover = types.Hover{ .contents = .{ .value = md } };
-                    try self.sendResponse(allocator, id, try types.hoverToJson(allocator, hover));
+                    try self.sendResponse(allocator, id, try hover.toJson(allocator));
                     return;
                 }
             }
