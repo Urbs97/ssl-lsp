@@ -52,77 +52,73 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         return;
     }
 
-    if (doc.parse_result == null) {
-        try ctx.sendResponse(allocator, req_id, .null);
-        return;
-    }
-    const pr = &doc.parse_result.?;
-
     const word = helpers.getWordAtPosition(doc.text, @intCast(pos.line), @intCast(pos.character)) orelse {
         try ctx.sendResponse(allocator, req_id, .null);
         return;
     };
 
-    // Search procedures
-    for (0..pr.num_procs) |i| {
-        const proc = pr.getProc(i);
-        if (std.mem.eql(u8, proc.name, word)) {
-            const decl_line: u32 = if (proc.declared_line > 0) proc.declared_line - 1 else 0;
-            const name_len: u32 = @intCast(proc.name.len);
-            const loc = types.Location{
-                .uri = uri,
-                .range = .{
-                    .start = .{ .line = decl_line, .character = 0 },
-                    .end = .{ .line = decl_line, .character = name_len },
-                },
-            };
-            try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
-            return;
-        }
-    }
-
-    // Search global variables
-    for (0..pr.num_vars) |i| {
-        const v = pr.getVar(i);
-        if (std.mem.eql(u8, v.name, word)) {
-            const var_line: u32 = if (v.declared_line > 0) v.declared_line - 1 else 0;
-            const name_len: u32 = @intCast(v.name.len);
-            const loc = types.Location{
-                .uri = uri,
-                .range = .{
-                    .start = .{ .line = var_line, .character = 0 },
-                    .end = .{ .line = var_line, .character = name_len },
-                },
-            };
-            try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
-            return;
-        }
-    }
-
-    // Search local variables in the enclosing procedure only
-    const cursor_line: u32 = @intCast(pos.line + 1); // parser lines are 1-indexed
-    for (0..pr.num_procs) |pi| {
-        const proc = pr.getProc(pi);
-        const start = proc.start_line orelse continue;
-        const end = proc.end_line orelse continue;
-        if (cursor_line >= start and cursor_line <= end) {
-            for (0..proc.num_local_vars) |vi| {
-                const local_var = pr.getProcVar(pi, vi);
-                if (std.mem.eql(u8, local_var.name, word)) {
-                    const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
-                    const name_len: u32 = @intCast(local_var.name.len);
-                    const loc = types.Location{
-                        .uri = uri,
-                        .range = .{
-                            .start = .{ .line = var_line, .character = 0 },
-                            .end = .{ .line = var_line, .character = name_len },
-                        },
-                    };
-                    try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
-                    return;
-                }
+    if (doc.parse_result) |*pr| {
+        // Search procedures
+        for (0..pr.num_procs) |i| {
+            const proc = pr.getProc(i);
+            if (std.mem.eql(u8, proc.name, word)) {
+                const decl_line: u32 = if (proc.declared_line > 0) proc.declared_line - 1 else 0;
+                const name_len: u32 = @intCast(proc.name.len);
+                const loc = types.Location{
+                    .uri = uri,
+                    .range = .{
+                        .start = .{ .line = decl_line, .character = 0 },
+                        .end = .{ .line = decl_line, .character = name_len },
+                    },
+                };
+                try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
+                return;
             }
-            break;
+        }
+
+        // Search global variables
+        for (0..pr.num_vars) |i| {
+            const v = pr.getVar(i);
+            if (std.mem.eql(u8, v.name, word)) {
+                const var_line: u32 = if (v.declared_line > 0) v.declared_line - 1 else 0;
+                const name_len: u32 = @intCast(v.name.len);
+                const loc = types.Location{
+                    .uri = uri,
+                    .range = .{
+                        .start = .{ .line = var_line, .character = 0 },
+                        .end = .{ .line = var_line, .character = name_len },
+                    },
+                };
+                try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
+                return;
+            }
+        }
+
+        // Search local variables in the enclosing procedure only
+        const cursor_line: u32 = @intCast(pos.line + 1); // parser lines are 1-indexed
+        for (0..pr.num_procs) |pi| {
+            const proc = pr.getProc(pi);
+            const start = proc.start_line orelse continue;
+            const end = proc.end_line orelse continue;
+            if (cursor_line >= start and cursor_line <= end) {
+                for (0..proc.num_local_vars) |vi| {
+                    const local_var = pr.getProcVar(pi, vi);
+                    if (std.mem.eql(u8, local_var.name, word)) {
+                        const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
+                        const name_len: u32 = @intCast(local_var.name.len);
+                        const loc = types.Location{
+                            .uri = uri,
+                            .range = .{
+                                .start = .{ .line = var_line, .character = 0 },
+                                .end = .{ .line = var_line, .character = name_len },
+                            },
+                        };
+                        try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
+                        return;
+                    }
+                }
+                break;
+            }
         }
     }
 
