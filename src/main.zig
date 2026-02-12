@@ -103,6 +103,8 @@ test {
     _ = @import("parsing/parser.zig");
     _ = @import("parsing/errors.zig");
     _ = @import("lsp/server.zig");
+    _ = @import("lsp/context.zig");
+    _ = @import("lsp/helpers.zig");
     _ = @import("lsp/transport.zig");
     _ = @import("lsp/types.zig");
 }
