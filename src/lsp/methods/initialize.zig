@@ -13,6 +13,9 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     try capabilities.put("referencesProvider", .{ .bool = true });
     try capabilities.put("hoverProvider", .{ .bool = true });
 
+    const completion_options = std.json.ObjectMap.init(allocator);
+    try capabilities.put("completionProvider", .{ .object = completion_options });
+
     var result = std.json.ObjectMap.init(allocator);
     try result.put("capabilities", .{ .object = capabilities });
 

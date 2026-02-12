@@ -25,10 +25,11 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         return;
     };
 
-    var pr = doc.parse_result orelse {
+    if (doc.parse_result == null) {
         try ctx.sendResponse(allocator, req_id, .null);
         return;
-    };
+    }
+    const pr = &doc.parse_result.?;
 
     const word = helpers.getWordAtPosition(doc.text, @intCast(pos.line), @intCast(pos.character)) orelse {
         try ctx.sendResponse(allocator, req_id, .null);
@@ -39,7 +40,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     for (0..pr.num_procs) |i| {
         const proc = pr.getProc(i);
         if (std.mem.eql(u8, proc.name, word)) {
-            const md = try helpers.formatProcHover(allocator, proc, i, &pr, doc.text);
+            const md = try helpers.formatProcHover(allocator, proc, i, pr, doc.text);
             const hover_result = types.Hover{ .contents = .{ .value = md } };
             try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
             return;
@@ -50,7 +51,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     for (0..pr.num_vars) |i| {
         const v = pr.getVar(i);
         if (std.mem.eql(u8, v.name, word)) {
-            const md = try helpers.formatVarHover(allocator, v, null, &pr, doc.text);
+            const md = try helpers.formatVarHover(allocator, v, null, pr, doc.text);
             const hover_result = types.Hover{ .contents = .{ .value = md } };
             try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
             return;
@@ -63,7 +64,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         for (0..proc.num_local_vars) |vi| {
             const local_var = pr.getProcVar(pi, vi);
             if (std.mem.eql(u8, local_var.name, word)) {
-                const md = try helpers.formatVarHover(allocator, local_var, proc.name, &pr, doc.text);
+                const md = try helpers.formatVarHover(allocator, local_var, proc.name, pr, doc.text);
                 const hover_result = types.Hover{ .contents = .{ .value = md } };
                 try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
                 return;

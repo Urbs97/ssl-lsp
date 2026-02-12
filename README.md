@@ -11,10 +11,11 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
   - Go to definition (user-defined procedures and variables)
   - Find references (all usages of a procedure or variable)
   - Hover information (signature, doc comments, line range, reference count)
+  - Completion (built-in opcodes with signatures/descriptions, user-defined procedures and variables)
 
 ### Planned
 - Go to definition for built-in opcodes
-- Completion and signature help for built-in opcodes
+- Signature help for built-in opcodes
 
 ## Requirements
 
@@ -89,6 +90,7 @@ src/
 └── lsp/
     ├── server.zig        # LSP message loop and method routing
     ├── context.zig       # Server state (open documents, allocators)
+    ├── builtins.zig      # Built-in opcode database (parsed from opcodes.txt)
     ├── helpers.zig       # Parameter extraction and formatting helpers
     ├── transport.zig     # JSON-RPC framing
     ├── types.zig         # LSP protocol types
@@ -103,7 +105,8 @@ src/
         ├── document_symbol.zig
         ├── definition.zig
         ├── references.zig
-        └── hover.zig
+        ├── hover.zig
+        └── completion.zig
 ```
 
 ## Testing
@@ -111,6 +114,11 @@ src/
 ```bash
 zig build test
 ```
+
+## Acknowledgments
+
+- Built-in opcode database (`opcodes.txt`) from [sfall Script Editor](https://github.com/phobos2077/sfall_script_editor) (GPLv3)
+- SSL parser from [sslc](https://github.com/sfall-team/sslc)
 
 ## License
 

@@ -116,3 +116,28 @@ pub const Hover = struct {
         return .{ .object = obj };
     }
 };
+
+pub const CompletionItemKind = enum(u8) {
+    Function = 3,
+    Variable = 6,
+};
+
+pub const CompletionItem = struct {
+    label: []const u8,
+    kind: CompletionItemKind,
+    detail: ?[]const u8 = null,
+    documentation: ?[]const u8 = null,
+
+    pub fn toJson(self: CompletionItem, allocator: std.mem.Allocator) !std.json.Value {
+        var obj = std.json.ObjectMap.init(allocator);
+        try obj.put("label", .{ .string = self.label });
+        try obj.put("kind", .{ .integer = @intFromEnum(self.kind) });
+        if (self.detail) |detail| {
+            try obj.put("detail", .{ .string = detail });
+        }
+        if (self.documentation) |doc| {
+            try obj.put("documentation", .{ .string = doc });
+        }
+        return .{ .object = obj };
+    }
+};

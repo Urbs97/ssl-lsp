@@ -132,11 +132,10 @@ pub const ParseResult = struct {
         return translateVar(self.namespace, raw);
     }
 
-    pub fn getProcVar(self: *ParseResult, proc_index: usize, var_index: usize) Variable {
+    pub fn getProcVar(self: *const ParseResult, proc_index: usize, var_index: usize) Variable {
         var raw: c.Variable = undefined;
         c.getProcVar(@intCast(proc_index), @intCast(var_index), &raw);
-        const ns = self.loadProcNamespace(proc_index);
-        return translateVar(ns, raw);
+        return translateVar(self.proc_namespaces[proc_index] orelse &.{}, raw);
     }
 
     pub fn getProcRefs(_: *const ParseResult, proc_index: usize, allocator: std.mem.Allocator) ![]Reference {
@@ -183,7 +182,7 @@ pub const ParseResult = struct {
         return extractName(self.stringspace, @intCast(offset));
     }
 
-    pub fn getProcVarRefs(_: *ParseResult, proc_index: usize, var_index: usize, allocator: std.mem.Allocator) ![]Reference {
+    pub fn getProcVarRefs(_: *const ParseResult, proc_index: usize, var_index: usize, allocator: std.mem.Allocator) ![]Reference {
         var raw: c.Variable = undefined;
         c.getProcVar(@intCast(proc_index), @intCast(var_index), &raw);
         const count: usize = @intCast(raw.numRefs);
@@ -203,16 +202,15 @@ pub const ParseResult = struct {
         return result;
     }
 
-    fn loadProcNamespace(self: *ParseResult, proc_index: usize) []const u8 {
-        if (self.proc_namespaces[proc_index]) |ns| return ns;
+    fn loadAllProcNamespaces(allocator: std.mem.Allocator, proc_namespaces: []?[]const u8) void {
+        for (proc_namespaces, 0..) |*slot, i| {
+            const size = c.getProcNamespaceSize(@intCast(i));
+            if (size <= 0) continue;
 
-        const size = c.getProcNamespaceSize(@intCast(proc_index));
-        if (size <= 0) return &.{};
-
-        const buf = self.allocator.alloc(u8, @intCast(size)) catch return &.{};
-        c.getProcNamespace(@intCast(proc_index), buf.ptr);
-        self.proc_namespaces[proc_index] = buf;
-        return buf;
+            const buf = allocator.alloc(u8, @intCast(size)) catch continue;
+            c.getProcNamespace(@intCast(i), buf.ptr);
+            slot.* = buf;
+        }
     }
 };
 
@@ -255,9 +253,9 @@ pub fn parse(allocator: std.mem.Allocator, file_path: []const u8, orig_path: []c
     const num_procs: usize = @intCast(c.numProcs());
     const num_vars: usize = @intCast(c.numVars());
 
-    // Allocate proc_namespaces array (all null initially, loaded lazily)
     const proc_namespaces = try allocator.alloc(?[]const u8, num_procs);
     @memset(proc_namespaces, null);
+    ParseResult.loadAllProcNamespaces(allocator, proc_namespaces);
 
     return .{
         .allocator = allocator,

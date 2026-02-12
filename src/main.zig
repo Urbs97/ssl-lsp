@@ -107,4 +107,5 @@ test {
     _ = @import("lsp/helpers.zig");
     _ = @import("lsp/transport.zig");
     _ = @import("lsp/types.zig");
+    _ = @import("lsp/builtins.zig");
 }
