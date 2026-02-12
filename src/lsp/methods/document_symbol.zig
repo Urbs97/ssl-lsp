@@ -20,10 +20,11 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         return;
     };
 
-    var pr = doc.parse_result orelse {
+    if (doc.parse_result == null) {
         try ctx.sendResponse(allocator, req_id, .{ .array = std.json.Array.init(allocator) });
         return;
-    };
+    }
+    const pr = &doc.parse_result.?;
 
     var symbols = std.json.Array.init(allocator);
 

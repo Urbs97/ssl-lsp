@@ -80,6 +80,7 @@ pub const Variable = struct {
     declared_line: u32,
     declared_file: ?[]const u8,
     num_refs: usize,
+    refs: []const Reference = &.{},
     array_len: usize,
     uses: usize,
     initialized: bool,
@@ -99,120 +100,54 @@ pub const Procedure = struct {
     end_line: ?u32,
     end_file: ?[]const u8,
     num_refs: usize,
+    refs: []const Reference = &.{},
     num_local_vars: usize,
     uses: usize,
 };
 
 pub const ParseResult = struct {
-    allocator: std.mem.Allocator,
+    arena: std.heap.ArenaAllocator,
     namespace: []const u8,
     stringspace: []const u8,
     proc_namespaces: []?[]const u8,
     num_procs: usize,
     num_vars: usize,
 
+    // All data is cached at parse time — no C library calls after construction
+    procs: []Procedure,
+    vars: []Variable,
+    proc_vars: [][]Variable,
+
     pub fn deinit(self: *ParseResult) void {
-        for (self.proc_namespaces) |maybe_ns| {
-            if (maybe_ns) |ns| self.allocator.free(ns);
-        }
-        self.allocator.free(self.proc_namespaces);
-        if (self.namespace.len > 0) self.allocator.free(self.namespace);
-        if (self.stringspace.len > 0) self.allocator.free(self.stringspace);
+        self.arena.deinit();
     }
 
     pub fn getProc(self: *const ParseResult, index: usize) Procedure {
-        var raw: c.Procedure = undefined;
-        c.getProc(@intCast(index), &raw);
-        return translateProc(self.namespace, raw);
+        return self.procs[index];
     }
 
     pub fn getVar(self: *const ParseResult, index: usize) Variable {
-        var raw: c.Variable = undefined;
-        c.getVar(@intCast(index), &raw);
-        return translateVar(self.namespace, raw);
+        return self.vars[index];
     }
 
-    pub fn getProcVar(self: *ParseResult, proc_index: usize, var_index: usize) Variable {
-        var raw: c.Variable = undefined;
-        c.getProcVar(@intCast(proc_index), @intCast(var_index), &raw);
-        const ns = self.loadProcNamespace(proc_index);
-        return translateVar(ns, raw);
+    pub fn getProcVar(self: *const ParseResult, proc_index: usize, var_index: usize) Variable {
+        return self.proc_vars[proc_index][var_index];
     }
 
-    pub fn getProcRefs(_: *const ParseResult, proc_index: usize, allocator: std.mem.Allocator) ![]Reference {
-        var raw: c.Procedure = undefined;
-        c.getProc(@intCast(proc_index), &raw);
-        const count: usize = @intCast(raw.numRefs);
-        if (count == 0) return &.{};
-
-        const refs = try allocator.alloc(c.Reference, count);
-        defer allocator.free(refs);
-        c.getProcRefs(@intCast(proc_index), refs.ptr);
-
-        const result = try allocator.alloc(Reference, count);
-        for (refs, 0..) |r, idx| {
-            result[idx] = .{
-                .line = @intCast(r.line),
-                .file = spanOptional(r.file),
-            };
-        }
-        return result;
+    pub fn getProcRefs(self: *const ParseResult, proc_index: usize, _: std.mem.Allocator) ![]const Reference {
+        return self.procs[proc_index].refs;
     }
 
-    pub fn getVarRefs(_: *const ParseResult, var_index: usize, allocator: std.mem.Allocator) ![]Reference {
-        var raw: c.Variable = undefined;
-        c.getVar(@intCast(var_index), &raw);
-        const count: usize = @intCast(raw.numRefs);
-        if (count == 0) return &.{};
-
-        const refs = try allocator.alloc(c.Reference, count);
-        defer allocator.free(refs);
-        c.getVarRefs(@intCast(var_index), refs.ptr);
-
-        const result = try allocator.alloc(Reference, count);
-        for (refs, 0..) |r, idx| {
-            result[idx] = .{
-                .line = @intCast(r.line),
-                .file = spanOptional(r.file),
-            };
-        }
-        return result;
+    pub fn getVarRefs(self: *const ParseResult, var_index: usize, _: std.mem.Allocator) ![]const Reference {
+        return self.vars[var_index].refs;
     }
 
     pub fn getStringValue(self: *const ParseResult, offset: u32) ?[]const u8 {
         return extractName(self.stringspace, @intCast(offset));
     }
 
-    pub fn getProcVarRefs(_: *ParseResult, proc_index: usize, var_index: usize, allocator: std.mem.Allocator) ![]Reference {
-        var raw: c.Variable = undefined;
-        c.getProcVar(@intCast(proc_index), @intCast(var_index), &raw);
-        const count: usize = @intCast(raw.numRefs);
-        if (count == 0) return &.{};
-
-        const refs = try allocator.alloc(c.Reference, count);
-        defer allocator.free(refs);
-        c.getProcVarRefs(@intCast(proc_index), @intCast(var_index), refs.ptr);
-
-        const result = try allocator.alloc(Reference, count);
-        for (refs, 0..) |r, idx| {
-            result[idx] = .{
-                .line = @intCast(r.line),
-                .file = spanOptional(r.file),
-            };
-        }
-        return result;
-    }
-
-    fn loadProcNamespace(self: *ParseResult, proc_index: usize) []const u8 {
-        if (self.proc_namespaces[proc_index]) |ns| return ns;
-
-        const size = c.getProcNamespaceSize(@intCast(proc_index));
-        if (size <= 0) return &.{};
-
-        const buf = self.allocator.alloc(u8, @intCast(size)) catch return &.{};
-        c.getProcNamespace(@intCast(proc_index), buf.ptr);
-        self.proc_namespaces[proc_index] = buf;
-        return buf;
+    pub fn getProcVarRefs(self: *const ParseResult, proc_index: usize, var_index: usize, _: std.mem.Allocator) ![]const Reference {
+        return self.proc_vars[proc_index][var_index].refs;
     }
 };
 
@@ -234,39 +169,138 @@ pub fn parse(allocator: std.mem.Allocator, file_path: []const u8, orig_path: []c
         };
     }
 
+    // All persistent data lives in an arena — a single errdefer/deinit frees everything
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    errdefer arena.deinit();
+    const aa = arena.allocator();
+
     // Fetch namespace
     const ns_size = c.namespaceSize();
     const namespace: []const u8 = if (ns_size > 0) blk: {
-        const buf = try allocator.alloc(u8, @intCast(ns_size));
+        const buf = try aa.alloc(u8, @intCast(ns_size));
         c.getNamespace(buf.ptr);
         break :blk buf;
     } else &.{};
-    errdefer if (namespace.len > 0) allocator.free(namespace);
 
     // Fetch stringspace
     const str_size = c.stringspaceSize();
     const stringspace: []const u8 = if (str_size > 0) blk: {
-        const buf = try allocator.alloc(u8, @intCast(str_size));
+        const buf = try aa.alloc(u8, @intCast(str_size));
         c.getStringspace(buf.ptr);
         break :blk buf;
     } else &.{};
-    errdefer if (stringspace.len > 0) allocator.free(stringspace);
 
     const num_procs: usize = @intCast(c.numProcs());
     const num_vars: usize = @intCast(c.numVars());
 
-    // Allocate proc_namespaces array (all null initially, loaded lazily)
-    const proc_namespaces = try allocator.alloc(?[]const u8, num_procs);
+    // Load procedure namespaces (needed for local variable name resolution;
+    // must stay alive because cached local variable names point into them)
+    const proc_namespaces = try aa.alloc(?[]const u8, num_procs);
     @memset(proc_namespaces, null);
+    for (proc_namespaces, 0..) |*slot, i| {
+        const size = c.getProcNamespaceSize(@intCast(i));
+        if (size <= 0) continue;
+        const buf = aa.alloc(u8, @intCast(size)) catch continue;
+        c.getProcNamespace(@intCast(i), buf.ptr);
+        slot.* = buf;
+    }
+
+    // Snapshot all procedure data from C into Zig-owned memory
+    const procs = try aa.alloc(Procedure, num_procs);
+    for (procs, 0..) |*p, i| {
+        var raw: c.Procedure = undefined;
+        c.getProc(@intCast(i), &raw);
+        p.* = translateProc(namespace, raw);
+        // Null out C string pointers — they won't survive a re-parse
+        p.declared_file = null;
+        p.start_file = null;
+        p.end_file = null;
+        // Cache refs
+        if (p.num_refs > 0) {
+            p.refs = try fetchRefs(aa, p.num_refs, struct {
+                fn fetch(idx: c_int, ptr: [*]c.Reference) void {
+                    c.getProcRefs(idx, ptr);
+                }
+            }.fetch, @intCast(i));
+        }
+    }
+
+    // Snapshot all global variable data
+    const vars = try aa.alloc(Variable, num_vars);
+    for (vars, 0..) |*v, i| {
+        var raw: c.Variable = undefined;
+        c.getVar(@intCast(i), &raw);
+        v.* = translateVar(namespace, raw);
+        v.declared_file = null;
+        if (v.num_refs > 0) {
+            v.refs = try fetchRefs(aa, v.num_refs, struct {
+                fn fetch(idx: c_int, ptr: [*]c.Reference) void {
+                    c.getVarRefs(idx, ptr);
+                }
+            }.fetch, @intCast(i));
+        }
+    }
+
+    // Snapshot all procedure-local variables
+    const proc_vars = try aa.alloc([]Variable, num_procs);
+    @memset(proc_vars, &[_]Variable{});
+    for (proc_vars, 0..) |*pv, pi| {
+        const n = procs[pi].num_local_vars;
+        if (n == 0) continue;
+        pv.* = try aa.alloc(Variable, n);
+        for (pv.*, 0..) |*v, vi| {
+            var raw: c.Variable = undefined;
+            c.getProcVar(@intCast(pi), @intCast(vi), &raw);
+            v.* = translateVar(proc_namespaces[pi] orelse &.{}, raw);
+            v.declared_file = null;
+            if (v.num_refs > 0) {
+                const count = v.num_refs;
+                const c_refs = try aa.alloc(c.Reference, count);
+                c.getProcVarRefs(@intCast(pi), @intCast(vi), c_refs.ptr);
+                const refs = try aa.alloc(Reference, count);
+                for (refs, 0..) |*r, ri| {
+                    r.* = .{
+                        .line = @intCast(c_refs[ri].line),
+                        .file = null,
+                    };
+                }
+                v.refs = refs;
+            }
+        }
+    }
 
     return .{
-        .allocator = allocator,
+        .arena = arena,
         .namespace = namespace,
         .stringspace = stringspace,
         .proc_namespaces = proc_namespaces,
         .num_procs = num_procs,
         .num_vars = num_vars,
+        .procs = procs,
+        .vars = vars,
+        .proc_vars = proc_vars,
     };
+}
+
+/// Fetch references from a C API function into a Zig-owned array
+fn fetchRefs(
+    allocator: std.mem.Allocator,
+    count: usize,
+    fetchFn: *const fn (c_int, [*]c.Reference) void,
+    index: c_int,
+) ![]const Reference {
+    const c_refs = try allocator.alloc(c.Reference, count);
+    defer allocator.free(c_refs);
+    fetchFn(index, c_refs.ptr);
+
+    const refs = try allocator.alloc(Reference, count);
+    for (refs, 0..) |*r, i| {
+        r.* = .{
+            .line = @intCast(c_refs[i].line),
+            .file = null,
+        };
+    }
+    return refs;
 }
 
 /// Convert a nullable C string pointer to an optional Zig slice

@@ -14,6 +14,8 @@ const document_symbol = @import("methods/document_symbol.zig");
 const definition = @import("methods/definition.zig");
 const references = @import("methods/references.zig");
 const hover = @import("methods/hover.zig");
+const completion = @import("methods/completion.zig");
+const builtins = @import("builtins.zig");
 
 const log = std.log.scoped(.server);
 
@@ -36,6 +38,7 @@ const routes = [_]Route{
     .{ .method = "textDocument/definition", .handler = definition.handle },
     .{ .method = "textDocument/references", .handler = references.handle },
     .{ .method = "textDocument/hover", .handler = hover.handle },
+    .{ .method = "textDocument/completion", .handler = completion.handle },
 };
 
 fn handleMessage(ctx: *Context, json_val: std.json.Value) !void {
@@ -83,6 +86,9 @@ fn handleMessage(ctx: *Context, json_val: std.json.Value) !void {
 pub fn run(allocator: std.mem.Allocator) !void {
     log.info("ssl-lsp server starting", .{});
 
+    try builtins.init(allocator);
+    defer builtins.deinit(allocator);
+
     var stdout_buf: [4096]u8 = undefined;
     var ctx = Context.init(allocator, &stdout_buf);
     defer ctx.deinit();
@@ -128,4 +134,6 @@ test {
     _ = definition;
     _ = references;
     _ = hover;
+    _ = completion;
+    _ = builtins;
 }

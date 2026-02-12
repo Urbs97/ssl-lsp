@@ -28,10 +28,11 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         return;
     };
 
-    var pr = doc.parse_result orelse {
+    if (doc.parse_result == null) {
         try ctx.sendResponse(allocator, req_id, .{ .array = std.json.Array.init(allocator) });
         return;
-    };
+    }
+    const pr = &doc.parse_result.?;
 
     const word = helpers.getWordAtPosition(doc.text, @intCast(pos.line), @intCast(pos.character)) orelse {
         try ctx.sendResponse(allocator, req_id, .{ .array = std.json.Array.init(allocator) });
@@ -108,40 +109,46 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         }
     }
 
-    // Search local variables in each procedure
+    // Search local variables in the enclosing procedure only
+    const cursor_line: u32 = @intCast(pos.line + 1); // parser lines are 1-indexed
     for (0..pr.num_procs) |pi| {
         const proc = pr.getProc(pi);
-        for (0..proc.num_local_vars) |vi| {
-            const local_var = pr.getProcVar(pi, vi);
-            if (std.mem.eql(u8, local_var.name, word)) {
-                if (include_declaration) {
-                    const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
-                    const loc = types.Location{
-                        .uri = uri,
-                        .range = .{
-                            .start = .{ .line = var_line, .character = 0 },
-                            .end = .{ .line = var_line, .character = 0 },
-                        },
-                    };
-                    try locations.append(try loc.toJson(allocator));
-                }
+        const start = proc.start_line orelse continue;
+        const end = proc.end_line orelse continue;
+        if (cursor_line >= start and cursor_line <= end) {
+            for (0..proc.num_local_vars) |vi| {
+                const local_var = pr.getProcVar(pi, vi);
+                if (std.mem.eql(u8, local_var.name, word)) {
+                    if (include_declaration) {
+                        const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
+                        const loc = types.Location{
+                            .uri = uri,
+                            .range = .{
+                                .start = .{ .line = var_line, .character = 0 },
+                                .end = .{ .line = var_line, .character = 0 },
+                            },
+                        };
+                        try locations.append(try loc.toJson(allocator));
+                    }
 
-                const refs = try pr.getProcVarRefs(pi, vi, allocator);
-                for (refs) |ref| {
-                    const ref_line: u32 = if (ref.line > 0) ref.line - 1 else 0;
-                    const loc = types.Location{
-                        .uri = uri,
-                        .range = .{
-                            .start = .{ .line = ref_line, .character = 0 },
-                            .end = .{ .line = ref_line, .character = 0 },
-                        },
-                    };
-                    try locations.append(try loc.toJson(allocator));
-                }
+                    const refs = try pr.getProcVarRefs(pi, vi, allocator);
+                    for (refs) |ref| {
+                        const ref_line: u32 = if (ref.line > 0) ref.line - 1 else 0;
+                        const loc = types.Location{
+                            .uri = uri,
+                            .range = .{
+                                .start = .{ .line = ref_line, .character = 0 },
+                                .end = .{ .line = ref_line, .character = 0 },
+                            },
+                        };
+                        try locations.append(try loc.toJson(allocator));
+                    }
 
-                try ctx.sendResponse(allocator, req_id, .{ .array = locations });
-                return;
+                    try ctx.sendResponse(allocator, req_id, .{ .array = locations });
+                    return;
+                }
             }
+            break;
         }
     }
 

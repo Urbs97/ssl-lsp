@@ -70,6 +70,7 @@ def test_initialize():
     caps = init_response["result"]["capabilities"]
     assert caps["textDocumentSync"] == 1
     assert caps["documentSymbolProvider"] is True, f"Expected documentSymbolProvider, got: {caps}"
+    assert "completionProvider" in caps, f"Expected completionProvider, got: {caps}"
 
     info = init_response["result"]["serverInfo"]
     assert info["name"] == "ssl-lsp"
@@ -506,6 +507,142 @@ def test_find_references_variable():
     print(f"PASS: test_find_references_variable ({len(result)} location(s))")
 
 
+def test_completion_builtins():
+    """Completion returns built-in opcodes matching a prefix."""
+    # "rand" on line 3 should match the built-in "random"
+    ssl_text = "variable x;\n\nprocedure start begin\n    rand\nend\n"
+    uri = "file:///tmp/test_completion_builtins.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor at end of "rand" on line 3, character 8 (4 spaces + 4 chars)
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 40,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 8},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 40]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+    assert "result" in comp_resp[0], f"Expected result, got: {comp_resp[0]}"
+
+    result = comp_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+    assert len(result) > 0, "Expected at least one completion item"
+
+    labels = [item["label"] for item in result]
+    assert "random" in labels, f"Expected 'random' in completions, got: {labels}"
+
+    # Verify structure of first item
+    random_items = [item for item in result if item["label"] == "random"]
+    assert random_items[0]["kind"] == 3, f"Expected Function kind (3), got: {random_items[0]['kind']}"
+    assert "detail" in random_items[0], "Expected detail (signature) on builtin completion"
+
+    print(f"PASS: test_completion_builtins ({len(result)} item(s))")
+
+
+def test_completion_user_symbols():
+    """Completion returns user-defined procedures and variables."""
+    # Valid SSL — cursor placed mid-word at "my_" in "my_counter" on line 7
+    ssl_text = "variable my_counter := 0;\nvariable my_flag := 1;\n\nprocedure my_helper begin\nend\n\nprocedure start begin\n    my_counter := 1;\nend\n"
+    uri = "file:///tmp/test_completion_user.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "my_" on line 7: 4 spaces + "my_" = character 7
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 41,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 7, "character": 7},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 41]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+
+    result = comp_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+
+    labels = [item["label"] for item in result]
+    assert "my_counter" in labels, f"Expected 'my_counter' in completions, got: {labels}"
+    assert "my_flag" in labels, f"Expected 'my_flag' in completions, got: {labels}"
+    assert "my_helper" in labels, f"Expected 'my_helper' in completions, got: {labels}"
+
+    # Check kinds: procedures are Function (3), variables are Variable (6)
+    by_label = {item["label"]: item for item in result}
+    assert by_label["my_helper"]["kind"] == 3, f"Expected Function kind for procedure, got: {by_label['my_helper']['kind']}"
+    assert by_label["my_counter"]["kind"] == 6, f"Expected Variable kind for variable, got: {by_label['my_counter']['kind']}"
+
+    print(f"PASS: test_completion_user_symbols ({len(result)} item(s))")
+
+
+def test_completion_no_prefix():
+    """Completion returns null when cursor is not on an identifier prefix."""
+    ssl_text = "variable x;\n\nprocedure start begin\n    \nend\n"
+    uri = "file:///tmp/test_completion_empty.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on empty line 3, character 4 (just whitespace)
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 42,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 4},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 42]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+
+    result = comp_resp[0]["result"]
+    assert result is None, f"Expected null for no prefix, got: {result}"
+
+    print("PASS: test_completion_no_prefix")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -520,6 +657,9 @@ if __name__ == "__main__":
         test_goto_definition_variable,
         test_find_references_procedure,
         test_find_references_variable,
+        test_completion_builtins,
+        test_completion_user_symbols,
+        test_completion_no_prefix,
     ]
 
     passed = 0

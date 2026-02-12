@@ -119,10 +119,12 @@ pub const Context = struct {
             break :blk null;
         };
 
-        // Cache the parse result in the document
+        // Cache the parse result in the document (keep old result on failure)
         if (self.documents.getPtr(uri)) |doc| {
-            if (doc.parse_result) |*old| old.deinit();
-            doc.parse_result = parse_result;
+            if (parse_result) |_| {
+                if (doc.parse_result) |*old| old.deinit();
+                doc.parse_result = parse_result;
+            }
         } else {
             // Document not in map (e.g. didClose clearing diagnostics) — clean up
             if (parse_result) |*pr| pr.deinit();

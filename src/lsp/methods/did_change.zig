@@ -20,9 +20,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, _: ?std.json.Value, p
 
     if (ctx.documents.getPtr(uri)) |doc| {
         doc.allocator.free(doc.text);
-        if (doc.parse_result) |*pr| pr.deinit();
         doc.text = try doc.allocator.dupe(u8, text);
-        doc.parse_result = null;
     }
 
     try ctx.publishDiagnostics(allocator, uri, text);

@@ -122,6 +122,54 @@ pub fn isIdentChar(ch: u8) bool {
     return std.ascii.isAlphanumeric(ch) or ch == '_';
 }
 
+/// Extract the identifier prefix being typed at a given (line, character) position.
+/// Only scans leftward from cursor position (characters before cursor, not after).
+pub fn getWordPrefixAtPosition(text: []const u8, line: u32, character: u32) ?[]const u8 {
+    // Find the target line
+    var current_line: u32 = 0;
+    var line_start: usize = 0;
+    for (text, 0..) |ch, idx| {
+        if (current_line == line) {
+            line_start = idx;
+            break;
+        }
+        if (ch == '\n') {
+            current_line += 1;
+        }
+    } else {
+        if (current_line != line) return null;
+        line_start = text.len;
+    }
+
+    // Find line end
+    var line_end: usize = line_start;
+    while (line_end < text.len and text[line_end] != '\n') {
+        line_end += 1;
+    }
+
+    const line_text = text[line_start..line_end];
+    const char_idx = @as(usize, character);
+
+    // Cursor at start of line or beyond — no prefix possible if at 0
+    if (char_idx == 0) return null;
+
+    // Clamp to line length (cursor can be at end of line)
+    const end = @min(char_idx, line_text.len);
+    if (end == 0) return null;
+
+    // Check that the character just before cursor is an identifier character
+    if (!isIdentChar(line_text[end - 1])) return null;
+
+    // Scan left from cursor
+    var start = end;
+    while (start > 0 and isIdentChar(line_text[start - 1])) {
+        start -= 1;
+    }
+
+    if (start == end) return null;
+    return line_text[start..end];
+}
+
 /// Extract consecutive `///` doc comment lines immediately above a 1-indexed declaration line.
 /// Returns the joined comment text (without the `///` prefix), or null if none found.
 pub fn extractDocComment(allocator: std.mem.Allocator, text: []const u8, declared_line_1: u32) !?[]const u8 {
@@ -177,7 +225,7 @@ pub fn extractDocComment(allocator: std.mem.Allocator, text: []const u8, declare
 }
 
 /// Format hover markdown for a procedure
-pub fn formatProcHover(allocator: std.mem.Allocator, proc: parser.Procedure, proc_index: usize, pr: *parser.ParseResult, text: []const u8) ![]const u8 {
+pub fn formatProcHover(allocator: std.mem.Allocator, proc: parser.Procedure, proc_index: usize, pr: *const parser.ParseResult, text: []const u8) ![]const u8 {
     var out: std.Io.Writer.Allocating = .init(allocator);
     const w = &out.writer;
 
