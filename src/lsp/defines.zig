@@ -178,7 +178,7 @@ fn parseDefinesFromText(
                     line_num += 1;
                     const cont_line = std.mem.trimRight(u8, cont_raw, "\r");
                     const cont_trimmed = std.mem.trim(u8, cont_line, " \t");
-                    if (body_buf.items.len > 0) try body_buf.append(allocator, ' ');
+                    if (body_buf.items.len > 0) try body_buf.append(allocator, '\n');
                     try body_buf.appendSlice(allocator, cont_trimmed);
                 } else break;
             }
@@ -338,12 +338,16 @@ pub fn formatDetail(allocator: std.mem.Allocator, def: Define) ![]const u8 {
     }
     if (def.body.len > 0) {
         try w.writeByte(' ');
-        // Truncate long bodies for display
-        if (def.body.len > 80) {
-            try w.writeAll(def.body[0..77]);
+        // Flatten newlines and truncate long bodies for display
+        const body_flat = try allocator.dupe(u8, def.body);
+        for (body_flat) |*ch| {
+            if (ch.* == '\n') ch.* = ' ';
+        }
+        if (body_flat.len > 80) {
+            try w.writeAll(body_flat[0..77]);
             try w.writeAll("...");
         } else {
-            try w.writeAll(def.body);
+            try w.writeAll(body_flat);
         }
     }
     return out.written();
@@ -435,7 +439,7 @@ test "multi-line define with backslash continuation" {
     const params = def.params.?;
     try std.testing.expectEqual(@as(usize, 1), params.len);
     try std.testing.expectEqualStrings("x", params[0]);
-    try std.testing.expectEqualStrings("foo(x); bar(x)", def.body);
+    try std.testing.expectEqualStrings("foo(x);\nbar(x)", def.body);
 }
 
 test "skip include guards" {
