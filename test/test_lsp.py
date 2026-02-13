@@ -839,6 +839,567 @@ def test_signature_help_not_in_call():
     print("PASS: test_signature_help_not_in_call")
 
 
+def test_goto_definition_define():
+    """Go-to-definition on a #define macro jumps to its definition line."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX_HP;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_goto_def_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MAX_HP" in "    variable x := MAX_HP;" at line 3, character 18
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 22,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 22]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location, got null"
+    assert result["uri"] == uri
+    # #define MAX_HP is at line 0 (0-indexed)
+    assert result["range"]["start"]["line"] == 0, f"Expected line 0, got: {result['range']['start']['line']}"
+
+    print("PASS: test_goto_definition_define")
+
+
+def test_goto_definition_include():
+    """Go-to-definition on a #include directive opens the included file."""
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    real_path = os.path.join(test_dir, "test_goto_def_include.ssl")
+    uri = "file://" + real_path
+    ssl_text = '#include "headers/sfall.h"\n\nprocedure start begin\nend\n'
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on the #include line (line 0, character 10 — on the path)
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 24,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 0, "character": 10},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 24]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location for #include, got null"
+    assert result["uri"].startswith("file://"), f"Expected file:// URI, got: {result['uri']}"
+    assert result["uri"].endswith("headers/sfall.h"), f"Expected URI ending with headers/sfall.h, got: {result['uri']}"
+    assert result["range"]["start"]["line"] == 0, f"Expected line 0, got: {result['range']['start']['line']}"
+
+    print(f"PASS: test_goto_definition_include (-> {'/'.join(result['uri'].split('/')[-2:])})")
+
+
+def test_goto_definition_define_from_header():
+    """Go-to-definition on a #define from an included header jumps to the header file."""
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    # Use a URI with the real test directory so #include paths resolve
+    real_path = os.path.join(test_dir, "test_goto_def_header.ssl")
+    uri = "file://" + real_path
+    ssl_text = '#include "headers/sfall.h"\n\nprocedure start begin\n    variable x := WORLDMAP;\nend\n'
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "WORLDMAP" in "    variable x := WORLDMAP;" at line 3, character 18
+    definition_req = {
+        "jsonrpc": "2.0",
+        "id": 23,
+        "method": "textDocument/definition",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, definition_req, *shutdown_messages())
+
+    def_resp = [r for r in responses if r.get("id") == 23]
+    assert len(def_resp) == 1, f"Expected definition response, got: {responses}"
+    assert "result" in def_resp[0], f"Expected result, got: {def_resp[0]}"
+
+    result = def_resp[0]["result"]
+    assert result is not None, "Expected a location for header define, got null"
+    # URI should point to sfall.h in the headers directory
+    assert result["uri"].endswith("headers/sfall.h"), f"Expected URI ending with headers/sfall.h, got: {result['uri']}"
+    assert result["uri"].startswith("file://"), f"Expected file:// URI, got: {result['uri']}"
+    assert result["range"]["start"]["line"] >= 0, f"Expected non-negative line, got: {result['range']['start']['line']}"
+
+    print(f"PASS: test_goto_definition_define_from_header (-> {result['uri'].split('/')[-1]}:{result['range']['start']['line']})")
+
+
+def test_hover_define():
+    """Hover on a #define macro shows its definition and source location."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX_HP;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_hover_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MAX_HP" in "    variable x := MAX_HP;" at line 3, character 18
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 60,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 60]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result, got null"
+    assert "contents" in result, f"Expected contents, got: {result}"
+
+    contents = result["contents"]["value"]
+    assert "#define MAX_HP 100" in contents, f"Expected '#define MAX_HP 100' in hover, got: {contents}"
+    assert "current file" in contents, f"Expected 'current file' in hover, got: {contents}"
+
+    print("PASS: test_hover_define")
+
+
+def test_hover_builtin():
+    """Hover on a built-in opcode shows its signature."""
+    ssl_text = (
+        "variable x;\n"
+        "\n"
+        "procedure start begin\n"
+        "    x := random(0, 10);\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_hover_builtin.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "random" in "    x := random(0, 10);" at line 3, character 9
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 61,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 9},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 61]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result, got null"
+    assert "contents" in result, f"Expected contents, got: {result}"
+
+    contents = result["contents"]["value"]
+    assert "random" in contents, f"Expected 'random' in hover, got: {contents}"
+
+    print("PASS: test_hover_builtin")
+
+
+def test_completion_defines():
+    """Completion returns #define macros matching a prefix."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "#define MAX_MP 50\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_completion_defines.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "MAX" on line 4: "    variable x := MAX" → character 22
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 43,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 4, "character": 22},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 43]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+    assert "result" in comp_resp[0], f"Expected result, got: {comp_resp[0]}"
+
+    result = comp_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+
+    labels = [item["label"] for item in result]
+    assert "MAX_HP" in labels, f"Expected 'MAX_HP' in completions, got: {labels}"
+    assert "MAX_MP" in labels, f"Expected 'MAX_MP' in completions, got: {labels}"
+
+    by_label = {item["label"]: item for item in result}
+    # Object-like defines should have kind Constant (21)
+    assert by_label["MAX_HP"]["kind"] == 21, f"Expected Constant kind (21), got: {by_label['MAX_HP']['kind']}"
+    assert "#define" in by_label["MAX_HP"]["detail"], f"Expected '#define' in detail, got: {by_label['MAX_HP']['detail']}"
+
+    print(f"PASS: test_completion_defines ({len(result)} item(s))")
+
+
+def test_completion_define_function_like():
+    """Completion returns function-like #define macros with correct kind."""
+    ssl_text = (
+        "#define CALC(x, y) ((x) + (y))\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable z := CAL\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_completion_define_func.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "CAL" on line 3: "    variable z := CAL" → character 22
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 44,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 22},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 44]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+    assert "result" in comp_resp[0], f"Expected result, got: {comp_resp[0]}"
+
+    result = comp_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+
+    labels = [item["label"] for item in result]
+    assert "CALC" in labels, f"Expected 'CALC' in completions, got: {labels}"
+
+    by_label = {item["label"]: item for item in result}
+    # Function-like defines should have kind Function (3)
+    assert by_label["CALC"]["kind"] == 3, f"Expected Function kind (3), got: {by_label['CALC']['kind']}"
+    assert "#define CALC(x, y)" in by_label["CALC"]["detail"], f"Expected '#define CALC(x, y)' in detail, got: {by_label['CALC']['detail']}"
+
+    print(f"PASS: test_completion_define_function_like ({len(result)} item(s))")
+
+
+def test_find_references_define():
+    """Find references on a #define macro returns its usages in the current file."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX_HP;\n"
+        "    variable y := MAX_HP;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_refs_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MAX_HP" at line 3, character 18
+    refs_req = {
+        "jsonrpc": "2.0",
+        "id": 32,
+        "method": "textDocument/references",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+            "context": {"includeDeclaration": True},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, refs_req, *shutdown_messages())
+
+    refs_resp = [r for r in responses if r.get("id") == 32]
+    assert len(refs_resp) == 1, f"Expected references response, got: {responses}"
+    assert "result" in refs_resp[0], f"Expected result, got: {refs_resp[0]}"
+
+    result = refs_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+    # Declaration at line 0 + usages at lines 3 and 4 = 3 locations
+    assert len(result) == 3, f"Expected 3 locations (declaration + 2 usages), got {len(result)}: {result}"
+
+    lines = sorted([loc["range"]["start"]["line"] for loc in result])
+    assert 0 in lines, f"Expected declaration at line 0, got lines: {lines}"
+    assert 3 in lines, f"Expected reference at line 3, got lines: {lines}"
+    assert 4 in lines, f"Expected reference at line 4, got lines: {lines}"
+
+    # Usage locations should have correct character offsets
+    usage_locs = [loc for loc in result if loc["range"]["start"]["line"] in (3, 4)]
+    for loc in usage_locs:
+        assert loc["range"]["start"]["character"] == 18, f"Expected character 18, got: {loc['range']['start']['character']}"
+        assert loc["range"]["end"]["character"] == 24, f"Expected end character 24, got: {loc['range']['end']['character']}"
+
+    # All locations should have the correct URI
+    for loc in result:
+        assert loc["uri"] == uri, f"Expected uri {uri}, got: {loc['uri']}"
+
+    print(f"PASS: test_find_references_define ({len(result)} location(s))")
+
+
+def test_nested_includes():
+    """Hover resolves defines from transitive includes (A.h -> B.h)."""
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    real_path = os.path.join(test_dir, "test_nested_includes.ssl")
+    uri = "file://" + real_path
+    ssl_text = '#include "headers/nested_a.h"\n\nprocedure start begin\n    variable x := FROM_B;\nend\n'
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "FROM_B" at line 3, character 18
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 70,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 70]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result for transitive include define, got null"
+    contents = result["contents"]["value"]
+    assert "#define FROM_B 2" in contents, f"Expected '#define FROM_B 2' in hover, got: {contents}"
+    assert "nested_b.h" in contents, f"Expected 'nested_b.h' in hover source, got: {contents}"
+
+    print("PASS: test_nested_includes")
+
+
+def test_signature_help_define_macro():
+    """Signature help shows params for a function-like #define macro."""
+    ssl_text = (
+        "#define CALC(x, y) ((x) + (y))\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable z := CALC(\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_sighelp_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "CALC(" on line 3: "    variable z := CALC(" → character 23
+    sig_req = {
+        "jsonrpc": "2.0",
+        "id": 71,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 23},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, sig_req, *shutdown_messages())
+
+    sig_resp = [r for r in responses if r.get("id") == 71]
+    assert len(sig_resp) == 1, f"Expected signatureHelp response, got: {responses}"
+    assert "result" in sig_resp[0], f"Expected result, got: {sig_resp[0]}"
+
+    result = sig_resp[0]["result"]
+    assert result is not None, "Expected SignatureHelp for define macro, got null"
+    assert "signatures" in result, f"Expected signatures, got: {result}"
+    assert len(result["signatures"]) == 1, f"Expected 1 signature, got: {len(result['signatures'])}"
+
+    sig = result["signatures"][0]
+    assert "CALC" in sig["label"], f"Expected 'CALC' in label, got: {sig['label']}"
+    assert "parameters" in sig, f"Expected parameters, got: {sig}"
+    assert len(sig["parameters"]) == 2, f"Expected 2 parameters (x, y), got: {len(sig['parameters'])}"
+    assert result["activeParameter"] == 0, f"Expected activeParameter 0, got: {result['activeParameter']}"
+
+    print(f"PASS: test_signature_help_define_macro (label: {sig['label']})")
+
+
+def test_ifdef_else_conditional():
+    """Hover shows first-branch value, not else-branch value."""
+    ssl_text = (
+        "#ifdef SOMETHING\n"
+        "#define MODE 1\n"
+        "#else\n"
+        "#define MODE 2\n"
+        "#endif\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MODE;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_ifdef_else.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MODE" at line 7, character 18
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 72,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 7, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 72]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result for ifdef/else define, got null"
+    contents = result["contents"]["value"]
+    # Should show first-branch value (1), not else-branch (2)
+    assert "#define MODE 1" in contents, f"Expected '#define MODE 1' in hover, got: {contents}"
+
+    print("PASS: test_ifdef_else_conditional")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -851,8 +1412,16 @@ if __name__ == "__main__":
         test_document_symbols_empty,
         test_goto_definition_procedure,
         test_goto_definition_variable,
+        test_goto_definition_define,
+        test_goto_definition_include,
+        test_goto_definition_define_from_header,
         test_find_references_procedure,
         test_find_references_variable,
+        test_find_references_define,
+        test_hover_define,
+        test_hover_builtin,
+        test_completion_defines,
+        test_completion_define_function_like,
         test_completion_builtins,
         test_completion_user_symbols,
         test_completion_no_prefix,
@@ -861,6 +1430,9 @@ if __name__ == "__main__":
         test_signature_help_builtin_second_param,
         test_signature_help_user_procedure,
         test_signature_help_not_in_call,
+        test_nested_includes,
+        test_signature_help_define_macro,
+        test_ifdef_else_conditional,
     ]
 
     passed = 0

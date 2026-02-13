@@ -1,6 +1,8 @@
 const std = @import("std");
 const parser = @import("../parsing/parser.zig");
 
+const log = std.log.scoped(.server);
+
 // JSON helper functions
 
 pub fn getObject(val: std.json.Value, key: []const u8) ?std.json.Value {
@@ -464,6 +466,318 @@ pub fn formatVarHover(allocator: std.mem.Allocator, v: parser.Variable, proc_nam
     return out.written();
 }
 
+/// Resolve an include path relative to a base directory, handling Windows backslashes.
+/// Returns the resolved path in `buf`, or null if the file cannot be found.
+/// Falls back to case-insensitive matching for each path component (needed for
+/// Windows-originated SSL scripts running on case-sensitive Linux filesystems).
+pub fn resolveIncludePath(buf: *[std.fs.max_path_bytes]u8, base_dir: []const u8, raw_inc_path: []const u8) ?[]const u8 {
+    // Normalize backslashes to forward slashes
+    var inc_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const inc_path = normalizeBackslashes(&inc_buf, raw_inc_path);
+
+    // Build the full path: base_dir/inc_path
+    // Strip trailing separator to avoid double-slash in joined path
+    const trimmed_dir = if (base_dir.len > 1 and base_dir[base_dir.len - 1] == std.fs.path.sep)
+        base_dir[0 .. base_dir.len - 1]
+    else
+        base_dir;
+    const full_path = std.fmt.bufPrint(buf, "{s}{c}{s}", .{ trimmed_dir, std.fs.path.sep, inc_path }) catch return null;
+
+    // Fast path: exact match
+    std.fs.cwd().access(full_path, .{}) catch {
+        // Slow path: case-insensitive component-by-component resolution
+        return resolveCaseInsensitive(buf, full_path);
+    };
+    return full_path;
+}
+
+/// Walk each component of `path` from the root, matching directory entries
+/// case-insensitively. Returns the resolved real path in `buf`, or null if
+/// no match is found.
+fn resolveCaseInsensitive(buf: *[std.fs.max_path_bytes]u8, path: []const u8) ?[]const u8 {
+    // Normalize away ".." and "." segments first
+    var norm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const normalized = normalizePath(&norm_buf, path);
+
+    // Split into components (skip leading '/' — we'll reconstruct from root)
+    const relative = if (normalized.len > 0 and normalized[0] == '/') normalized[1..] else normalized;
+    if (relative.len == 0) return null;
+
+    // Build resolved path in buf, starting from root "/"
+    var out_len: usize = 0;
+
+    var comp_iter = std.mem.splitScalar(u8, relative, '/');
+    while (comp_iter.next()) |component| {
+        if (component.len == 0) continue;
+
+        // Current directory to search in
+        const search_dir = if (out_len == 0) "/" else buf[0..out_len];
+
+        // Try exact match first
+        const exact_len = out_len + 1 + component.len;
+        if (exact_len <= buf.len) {
+            buf[out_len] = '/';
+            @memcpy(buf[out_len + 1 ..][0..component.len], component);
+            std.fs.cwd().access(buf[0..exact_len], .{}) catch {
+                // Exact match failed — scan directory for case-insensitive match
+                buf[out_len] = '/';
+                if (findCaseInsensitiveEntry(buf, out_len + 1, search_dir, component)) |name_len| {
+                    out_len += 1 + name_len;
+                    continue;
+                }
+                return null;
+            };
+            out_len = exact_len;
+            continue;
+        }
+        return null;
+    }
+
+    if (out_len == 0) return null;
+
+    // Verify the final path actually exists
+    std.fs.cwd().access(buf[0..out_len], .{}) catch return null;
+    return buf[0..out_len];
+}
+
+/// Normalize a path by resolving "." and ".." segments in place.
+fn normalizePath(buf: *[std.fs.max_path_bytes]u8, path: []const u8) []const u8 {
+    var components: [256][]const u8 = undefined;
+    var count: usize = 0;
+    const is_absolute = path.len > 0 and path[0] == '/';
+
+    var iter = std.mem.splitScalar(u8, path, '/');
+    while (iter.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (std.mem.eql(u8, comp, "..")) {
+            if (count > 0) count -= 1;
+            continue;
+        }
+        if (count >= components.len) {
+            log.warn("normalizePath: path has more than {d} components, truncating", .{components.len});
+            break;
+        }
+        components[count] = comp;
+        count += 1;
+    }
+
+    // Reconstruct
+    var out_len: usize = 0;
+    if (is_absolute) {
+        buf[0] = '/';
+        out_len = 1;
+    }
+    for (components[0..count], 0..) |comp, i| {
+        if (i > 0 or is_absolute) {
+            if (out_len > 1 or !is_absolute) {
+                buf[out_len] = '/';
+                out_len += 1;
+            }
+        }
+        @memcpy(buf[out_len..][0..comp.len], comp);
+        out_len += comp.len;
+    }
+    return buf[0..out_len];
+}
+
+/// Scan a directory for an entry matching `name` case-insensitively.
+/// Writes the real entry name directly into `buf` at the given `buf_offset`.
+/// Returns the length of the entry name written, or null if no match found.
+fn findCaseInsensitiveEntry(buf: *[std.fs.max_path_bytes]u8, buf_offset: usize, dir_path: []const u8, name: []const u8) ?usize {
+    const dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return null;
+    // dir is a value type in Zig's std, but we need to iterate — use a mutable copy
+    var mutable_dir = dir;
+    defer mutable_dir.close();
+
+    var it = mutable_dir.iterate();
+    while (it.next() catch return null) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.name, name)) {
+            if (buf_offset + entry.name.len > buf.len) return null;
+            @memcpy(buf[buf_offset..][0..entry.name.len], entry.name);
+            return entry.name.len;
+        }
+    }
+    return null;
+}
+
+/// Replace backslashes with forward slashes for cross-platform path compatibility.
+fn normalizeBackslashes(buf: []u8, path: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, path, '\\') == null) return path;
+    const len = @min(path.len, buf.len);
+    @memcpy(buf[0..len], path[0..len]);
+    std.mem.replaceScalar(u8, buf[0..len], '\\', '/');
+    return buf[0..len];
+}
+
+/// Convert a file:// URI to a filesystem path, decoding percent-encoded characters.
+/// Always returns an owned allocation that the caller must free.
+pub fn uriToPath(allocator: std.mem.Allocator, uri: []const u8) ![]const u8 {
+    const encoded = if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+    const component = std.Uri.Component{ .percent_encoded = encoded };
+    return std.fmt.allocPrint(allocator, "{f}", .{std.fmt.alt(component, .formatRaw)});
+}
+
+pub const ResolvedPath = struct {
+    path: []const u8,
+    owned: ?[]const u8,
+    allocator: std.mem.Allocator,
+
+    pub fn deinit(self: ResolvedPath) void {
+        if (self.owned) |o| self.allocator.free(o);
+    }
+};
+
+/// Resolve a file:// URI to a filesystem path, with fallback to stripping the scheme prefix.
+pub fn resolveUriToPath(allocator: std.mem.Allocator, uri: []const u8) ResolvedPath {
+    const owned = uriToPath(allocator, uri) catch null;
+    const path = owned orelse if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+    return .{ .path = path, .owned = owned, .allocator = allocator };
+}
+
+/// Construct a file:// URI from an absolute filesystem path.
+/// Percent-encodes characters that are not valid in URI paths (spaces, #, etc.).
+pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    try out.writer.writeAll("file://");
+    try (std.Uri.Component{ .raw = path }).formatPath(&out.writer);
+    return out.written();
+}
+
+pub const WordOccurrence = struct {
+    line: u32,
+    character: u32,
+};
+
+/// A range of bytes within a line that represent actual code (not comments or strings).
+pub const CodeRange = struct {
+    start: usize,
+    end: usize,
+};
+
+/// Compute byte ranges within a line that are "code" — not inside comments or string literals.
+/// `in_block_comment` tracks whether we are inside a `/* */` block comment from a previous line.
+/// Returns the updated block-comment state for the next line.
+pub fn computeCodeRanges(line: []const u8, in_block_comment: bool, ranges: *std.ArrayListUnmanaged(CodeRange), allocator: std.mem.Allocator) !bool {
+    var in_block = in_block_comment;
+    var i: usize = 0;
+    var code_start: ?usize = if (!in_block) @as(usize, 0) else null;
+
+    while (i < line.len) {
+        if (in_block) {
+            // Look for end of block comment
+            if (i + 1 < line.len and line[i] == '*' and line[i + 1] == '/') {
+                i += 2;
+                in_block = false;
+                code_start = i;
+            } else {
+                i += 1;
+            }
+        } else {
+            // Line comment: rest of line is not code
+            if (i + 1 < line.len and line[i] == '/' and line[i + 1] == '/') {
+                if (code_start) |cs| {
+                    if (i > cs) try ranges.append(allocator, .{ .start = cs, .end = i });
+                }
+                return in_block; // rest of line is comment
+            }
+            // Block comment start
+            if (i + 1 < line.len and line[i] == '/' and line[i + 1] == '*') {
+                if (code_start) |cs| {
+                    if (i > cs) try ranges.append(allocator, .{ .start = cs, .end = i });
+                }
+                code_start = null;
+                in_block = true;
+                i += 2;
+                continue;
+            }
+            // String literal
+            if (line[i] == '"') {
+                // Include the part before the string as code, but not the string itself
+                // Actually, we want identifiers inside strings to NOT match, so the string
+                // content is excluded from code ranges.
+                if (code_start) |cs| {
+                    if (i > cs) try ranges.append(allocator, .{ .start = cs, .end = i });
+                }
+                i += 1; // skip opening quote
+                while (i < line.len) {
+                    if (line[i] == '\\' and i + 1 < line.len) {
+                        i += 2; // skip escaped character
+                    } else if (line[i] == '"') {
+                        i += 1; // skip closing quote
+                        break;
+                    } else {
+                        i += 1;
+                    }
+                }
+                code_start = i;
+                continue;
+            }
+            i += 1;
+        }
+    }
+
+    // Close any remaining code range
+    if (code_start) |cs| {
+        if (line.len > cs) try ranges.append(allocator, .{ .start = cs, .end = line.len });
+    }
+
+    return in_block;
+}
+
+/// Check if a match at `pos` with length `len` is fully within any code range.
+fn isInCodeRange(ranges: []const CodeRange, pos: usize, len: usize) bool {
+    for (ranges) |r| {
+        if (pos >= r.start and pos + len <= r.end) return true;
+    }
+    return false;
+}
+
+/// Case-insensitive substring search starting at `start`.
+fn indexOfPosIgnoreCase(haystack: []const u8, start: usize, needle: []const u8) ?usize {
+    if (needle.len == 0) return start;
+    if (start + needle.len > haystack.len) return null;
+    var i = start;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i..][0..needle.len], needle)) return i;
+    }
+    return null;
+}
+
+/// Find all whole-word occurrences of `word` in `text`, returning line/character positions.
+/// A "whole word" match means the character before and after are not identifier characters.
+/// Matches inside comments (`//`, `/* */`) and string literals (`"..."`) are excluded.
+/// Matching is case-insensitive.
+pub fn findWordOccurrences(allocator: std.mem.Allocator, text: []const u8, word: []const u8) ![]WordOccurrence {
+    var results = std.ArrayListUnmanaged(WordOccurrence){};
+    defer results.deinit(allocator);
+
+    var code_ranges = std.ArrayListUnmanaged(CodeRange){};
+    defer code_ranges.deinit(allocator);
+
+    var in_block_comment = false;
+    var line_num: u32 = 0;
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    while (line_iter.next()) |raw_line| {
+        const line = std.mem.trimRight(u8, raw_line, "\r");
+
+        code_ranges.clearRetainingCapacity();
+        in_block_comment = try computeCodeRanges(line, in_block_comment, &code_ranges, allocator);
+
+        var col: usize = 0;
+        while (indexOfPosIgnoreCase(line, col, word)) |match_pos| {
+            const before_ok = match_pos == 0 or !isIdentChar(line[match_pos - 1]);
+            const after_ok = match_pos + word.len >= line.len or !isIdentChar(line[match_pos + word.len]);
+            if (before_ok and after_ok and isInCodeRange(code_ranges.items, match_pos, word.len)) {
+                try results.append(allocator, .{ .line = line_num, .character = @intCast(match_pos) });
+            }
+            col = match_pos + 1;
+        }
+        line_num += 1;
+    }
+
+    return try allocator.dupe(WordOccurrence, results.items);
+}
+
 test "getCallContext basic" {
     const text = "random(1, 2)";
     // Cursor after opening paren: random(|
@@ -544,4 +858,144 @@ test "parseSignatureParams zero args" {
     const params = parseSignatureParams(std.testing.allocator, "void cleanup()").?;
     defer std.testing.allocator.free(params);
     try std.testing.expectEqual(@as(usize, 0), params.len);
+}
+
+test "uriToPath decodes percent-encoded characters" {
+    const path = try uriToPath(std.testing.allocator, "file:///home/user/my%20project/file.ssl");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/home/user/my project/file.ssl", path);
+}
+
+test "uriToPath with no encoding" {
+    const path = try uriToPath(std.testing.allocator, "file:///home/user/project/file.ssl");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/home/user/project/file.ssl", path);
+}
+
+test "resolveIncludePath case-insensitive fallback" {
+    // Create a temp directory structure: /tmp/ssl_test_ci/HEADERS/SCENEPID.H
+    const base = "/tmp/ssl_test_ci";
+    std.fs.cwd().makePath(base ++ "/HEADERS") catch {};
+    defer std.fs.cwd().deleteTree(base) catch {};
+
+    // Create test file
+    {
+        const f = std.fs.cwd().createFile(base ++ "/HEADERS/SCENEPID.H", .{}) catch return;
+        f.close();
+    }
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // Exact case should work
+    const exact = resolveIncludePath(&buf, base, "HEADERS/SCENEPID.H");
+    try std.testing.expect(exact != null);
+
+    // Wrong case should also resolve via case-insensitive fallback
+    var buf2: [std.fs.max_path_bytes]u8 = undefined;
+    const ci = resolveIncludePath(&buf2, base, "headers/ScenePid.h");
+    try std.testing.expect(ci != null);
+
+    // Both should point to the same actual file
+    if (exact) |e| {
+        if (ci) |c| {
+            try std.testing.expectEqualStrings(e, c);
+        }
+    }
+}
+
+test "resolveIncludePath case-insensitive with dotdot" {
+    // Create: /tmp/ssl_test_ci2/HEADERS/SCENEPID.H
+    const base = "/tmp/ssl_test_ci2";
+    std.fs.cwd().makePath(base ++ "/HEADERS") catch {};
+    std.fs.cwd().makePath(base ++ "/MAPS") catch {};
+    defer std.fs.cwd().deleteTree(base) catch {};
+
+    {
+        const f = std.fs.cwd().createFile(base ++ "/HEADERS/SCENEPID.H", .{}) catch return;
+        f.close();
+    }
+
+    // Resolve "..\headers\ScenePid.h" from the MAPS directory (simulating DEFINE.H's include
+    // being resolved from the included file's directory)
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const result = resolveIncludePath(&buf, base ++ "/HEADERS", "..\\headers\\ScenePid.h");
+    try std.testing.expect(result != null);
+    // Should contain HEADERS/SCENEPID.H (the real casing)
+    try std.testing.expect(std.mem.endsWith(u8, result.?, "/HEADERS/SCENEPID.H"));
+}
+
+test "normalizePath resolves dotdot" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const result = normalizePath(&buf, "/foo/bar/../baz/./qux");
+    try std.testing.expectEqualStrings("/foo/baz/qux", result);
+}
+
+test "normalizePath absolute simple" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const result = normalizePath(&buf, "/a/b/c");
+    try std.testing.expectEqualStrings("/a/b/c", result);
+}
+
+test "findWordOccurrences skips line comments" {
+    const allocator = std.testing.allocator;
+    const text = "FOO + BAR // FOO in comment\nFOO again";
+    const results = try findWordOccurrences(allocator, text, "FOO");
+    defer allocator.free(results);
+    // Should find FOO at line 0 col 0 and line 1 col 0, but NOT the one in the comment
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u32, 0), results[0].line);
+    try std.testing.expectEqual(@as(u32, 0), results[0].character);
+    try std.testing.expectEqual(@as(u32, 1), results[1].line);
+    try std.testing.expectEqual(@as(u32, 0), results[1].character);
+}
+
+test "findWordOccurrences skips block comments" {
+    const allocator = std.testing.allocator;
+    const text = "FOO /* FOO */ FOO";
+    const results = try findWordOccurrences(allocator, text, "FOO");
+    defer allocator.free(results);
+    // Should find FOO at col 0 and col 14, but NOT the one inside /* */
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u32, 0), results[0].character);
+    try std.testing.expectEqual(@as(u32, 14), results[1].character);
+}
+
+test "findWordOccurrences skips multi-line block comments" {
+    const allocator = std.testing.allocator;
+    const text = "FOO /* start\nFOO inside\nend */ FOO";
+    const results = try findWordOccurrences(allocator, text, "FOO");
+    defer allocator.free(results);
+    // Should find FOO at line 0 col 0 and line 2 col 7, but not the ones in the block comment
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u32, 0), results[0].line);
+    try std.testing.expectEqual(@as(u32, 0), results[0].character);
+    try std.testing.expectEqual(@as(u32, 2), results[1].line);
+    try std.testing.expectEqual(@as(u32, 7), results[1].character);
+}
+
+test "findWordOccurrences skips string literals" {
+    const allocator = std.testing.allocator;
+    const text =
+        \\FOO + "FOO" + FOO
+    ;
+    const results = try findWordOccurrences(allocator, text, "FOO");
+    defer allocator.free(results);
+    // Should find FOO at col 0 and col 14, but NOT the one inside the string
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u32, 0), results[0].character);
+    try std.testing.expectEqual(@as(u32, 14), results[1].character);
+}
+
+test "findWordOccurrences handles escaped quotes in strings" {
+    const allocator = std.testing.allocator;
+    const text =
+        \\FOO + "FOO\"FOO" + FOO
+    ;
+    const results = try findWordOccurrences(allocator, text, "FOO");
+    defer allocator.free(results);
+    // Line is: FOO + "FOO\"FOO" + FOO
+    // String spans col 6..15 (inclusive), last FOO at col 19
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expectEqual(@as(u32, 0), results[0].character);
+    try std.testing.expectEqual(@as(u32, 19), results[1].character);
 }

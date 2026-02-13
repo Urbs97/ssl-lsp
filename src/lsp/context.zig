@@ -1,8 +1,10 @@
 const std = @import("std");
 const transport = @import("transport.zig");
 const types = @import("types.zig");
+const helpers = @import("helpers.zig");
 const errors = @import("../parsing/errors.zig");
 const parser = @import("../parsing/parser.zig");
+const defines_mod = @import("defines.zig");
 
 const log = std.log.scoped(.server);
 
@@ -11,10 +13,12 @@ pub const Document = struct {
     allocator: std.mem.Allocator,
     text: []const u8,
     parse_result: ?parser.ParseResult = null,
+    defines: ?defines_mod.DefineSet = null,
 
     pub fn deinit(self: *Document) void {
         self.allocator.free(self.text);
         if (self.parse_result) |*pr| pr.deinit();
+        if (self.defines) |*d| d.deinit();
     }
 };
 
@@ -110,11 +114,13 @@ pub const Context = struct {
         }
 
         // Resolve the original file's directory for include file resolution
-        const file_path = if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+        const resolved = helpers.resolveUriToPath(allocator, uri);
+        defer resolved.deinit();
+        const file_path = resolved.path;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
 
         // Run the parser using self.allocator so ParseResult outlives the arena
-        var parse_result = parser.parse(self.allocator, tmp_path, tmp_path, include_dir) catch |err| blk: {
+        var parse_result = parser.parse(self.allocator, tmp_path, file_path, include_dir) catch |err| blk: {
             log.debug("parser failed: {}", .{err});
             break :blk null;
         };
@@ -124,6 +130,17 @@ pub const Context = struct {
             if (parse_result) |_| {
                 if (doc.parse_result) |*old| old.deinit();
                 doc.parse_result = parse_result;
+            }
+
+            // Extract #define macros (cache header defines when includes haven't changed)
+            const prev_defines: ?*const defines_mod.DefineSet = if (doc.defines) |*d| d else null;
+            const new_defines = defines_mod.extractDefines(self.allocator, text, include_dir, prev_defines) catch |err| blk: {
+                log.warn("extractDefines failed: {}", .{err});
+                break :blk null;
+            };
+            if (new_defines != null) {
+                if (doc.defines) |*old_defs| old_defs.deinit();
+                doc.defines = new_defines;
             }
         } else {
             // Document not in map (e.g. didClose clearing diagnostics) — clean up

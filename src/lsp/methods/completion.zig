@@ -3,6 +3,7 @@ const Context = @import("../context.zig").Context;
 const helpers = @import("../helpers.zig");
 const types = @import("../types.zig");
 const builtins = @import("../builtins.zig");
+const defines_mod = @import("../defines.zig");
 
 const log = std.log.scoped(.server);
 
@@ -88,6 +89,25 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
                     }
                 }
                 break;
+            }
+        }
+    }
+
+    // #define macros from included headers
+    if (doc.defines) |*defs| {
+        var it = defs.defines.iterator();
+        while (it.next()) |entry| {
+            const def = entry.value_ptr.*;
+            if (std.ascii.startsWithIgnoreCase(def.name, prefix)) {
+                const kind: types.CompletionItemKind = if (def.params != null) .Function else .Constant;
+                const detail = defines_mod.formatDetail(allocator, def) catch null;
+                const item = types.CompletionItem{
+                    .label = def.name,
+                    .kind = kind,
+                    .detail = detail,
+                    .documentation = def.doc_comment,
+                };
+                try items.append(try item.toJson(allocator));
             }
         }
     }

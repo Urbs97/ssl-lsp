@@ -46,6 +46,8 @@ end
 procedure start begin
    display_msg("Script started");
    my_global_var := 0;
+   my_global_var := WORLDMAP;
+   my_global_var := CALC_DAMAGE(10,10);
    call setup;
 end
 
