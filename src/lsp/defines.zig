@@ -228,7 +228,7 @@ fn parseDefinesFromText(
             // Skip include guards: empty body + (matches preceding #ifndef OR name ends with _H)
             if (body.len == 0) {
                 const is_guard = if (last_ifndef) |ifndef_name|
-                    std.mem.eql(u8, name, ifndef_name)
+                    std.ascii.eqlIgnoreCase(name, ifndef_name)
                 else
                     false;
                 if (is_guard or std.mem.endsWith(u8, name, "_H")) {

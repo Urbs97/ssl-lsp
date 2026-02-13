@@ -36,7 +36,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     if (doc.parse_result) |*pr| {
         for (0..pr.num_procs) |i| {
             const proc = pr.getProc(i);
-            if (std.mem.eql(u8, proc.name, word)) {
+            if (std.ascii.eqlIgnoreCase(proc.name, word)) {
                 const md = try helpers.formatProcHover(allocator, proc, i, pr, doc.text);
                 const hover_result = types.Hover{ .contents = .{ .value = md } };
                 try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
@@ -47,7 +47,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         // Search global variables
         for (0..pr.num_vars) |i| {
             const v = pr.getVar(i);
-            if (std.mem.eql(u8, v.name, word)) {
+            if (std.ascii.eqlIgnoreCase(v.name, word)) {
                 const md = try helpers.formatVarHover(allocator, v, null, pr, doc.text);
                 const hover_result = types.Hover{ .contents = .{ .value = md } };
                 try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
@@ -64,7 +64,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
             if (cursor_line >= start and cursor_line <= end) {
                 for (0..proc.num_local_vars) |vi| {
                     const local_var = pr.getProcVar(pi, vi);
-                    if (std.mem.eql(u8, local_var.name, word)) {
+                    if (std.ascii.eqlIgnoreCase(local_var.name, word)) {
                         const md = try helpers.formatVarHover(allocator, local_var, proc.name, pr, doc.text);
                         const hover_result = types.Hover{ .contents = .{ .value = md } };
                         try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
@@ -88,7 +88,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Search built-in opcodes
     for (builtins.opcodes()) |op| {
-        if (std.mem.eql(u8, op.name, word)) {
+        if (std.ascii.eqlIgnoreCase(op.name, word)) {
             var out: std.Io.Writer.Allocating = .init(allocator);
             const w = &out.writer;
             try w.writeAll("```ssl\n");

@@ -40,7 +40,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         // Search procedures
         for (0..pr.num_procs) |i| {
             const proc = pr.getProc(i);
-            if (std.mem.eql(u8, proc.name, word)) {
+            if (std.ascii.eqlIgnoreCase(proc.name, word)) {
                 if (include_declaration) {
                     const decl_line: u32 = if (proc.declared_line > 0) proc.declared_line - 1 else 0;
                     const loc = types.Location{
@@ -74,7 +74,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         // Search global variables
         for (0..pr.num_vars) |i| {
             const v = pr.getVar(i);
-            if (std.mem.eql(u8, v.name, word)) {
+            if (std.ascii.eqlIgnoreCase(v.name, word)) {
                 if (include_declaration) {
                     const var_line: u32 = if (v.declared_line > 0) v.declared_line - 1 else 0;
                     const loc = types.Location{
@@ -114,7 +114,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
             if (cursor_line >= start and cursor_line <= end) {
                 for (0..proc.num_local_vars) |vi| {
                     const local_var = pr.getProcVar(pi, vi);
-                    if (std.mem.eql(u8, local_var.name, word)) {
+                    if (std.ascii.eqlIgnoreCase(local_var.name, word)) {
                         if (include_declaration) {
                             const var_line: u32 = if (local_var.declared_line > 0) local_var.declared_line - 1 else 0;
                             const loc = types.Location{

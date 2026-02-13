@@ -124,7 +124,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Search #define macros
     if (doc.defines) |*defs| {
-        if (defs.lookup(call_ctx.func_name)) |def| {
+        if (defs.lookupCaseInsensitive(call_ctx.func_name)) |def| {
             if (def.params) |def_params| {
                 if (def_params.len > 0) {
                     // Build label: "name(param1, param2)"

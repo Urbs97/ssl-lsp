@@ -723,9 +723,21 @@ fn isInCodeRange(ranges: []const CodeRange, pos: usize, len: usize) bool {
     return false;
 }
 
+/// Case-insensitive substring search starting at `start`.
+fn indexOfPosIgnoreCase(haystack: []const u8, start: usize, needle: []const u8) ?usize {
+    if (needle.len == 0) return start;
+    if (start + needle.len > haystack.len) return null;
+    var i = start;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        if (std.ascii.eqlIgnoreCase(haystack[i..][0..needle.len], needle)) return i;
+    }
+    return null;
+}
+
 /// Find all whole-word occurrences of `word` in `text`, returning line/character positions.
 /// A "whole word" match means the character before and after are not identifier characters.
 /// Matches inside comments (`//`, `/* */`) and string literals (`"..."`) are excluded.
+/// Matching is case-insensitive.
 pub fn findWordOccurrences(allocator: std.mem.Allocator, text: []const u8, word: []const u8) ![]WordOccurrence {
     var results = std.ArrayListUnmanaged(WordOccurrence){};
     defer results.deinit(allocator);
@@ -743,7 +755,7 @@ pub fn findWordOccurrences(allocator: std.mem.Allocator, text: []const u8, word:
         in_block_comment = try computeCodeRanges(line, in_block_comment, &code_ranges, allocator);
 
         var col: usize = 0;
-        while (std.mem.indexOfPos(u8, line, col, word)) |match_pos| {
+        while (indexOfPosIgnoreCase(line, col, word)) |match_pos| {
             const before_ok = match_pos == 0 or !isIdentChar(line[match_pos - 1]);
             const after_ok = match_pos + word.len >= line.len or !isIdentChar(line[match_pos + word.len]);
             if (before_ok and after_ok and isInCodeRange(code_ranges.items, match_pos, word.len)) {
