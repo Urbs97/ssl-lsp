@@ -10,6 +10,11 @@ pub const Define = struct {
     file: []const u8, // source filename for hover display
     line: u32, // 1-indexed
     doc_comment: ?[]const u8, // preceding // comments
+
+    /// Returns true if this define is from the current document (not from an included header).
+    pub fn isLocal(self: Define) bool {
+        return self.file.len == 0;
+    }
 };
 
 pub const FileMtime = struct {
@@ -76,7 +81,7 @@ pub fn extractDefines(child_allocator: std.mem.Allocator, document_text: []const
             // Copy header defines (file.len != 0) from previous set
             var it = prev.defines.iterator();
             while (it.next()) |entry| {
-                if (entry.value_ptr.file.len != 0) {
+                if (!entry.value_ptr.isLocal()) {
                     const copied = try copyDefine(allocator, entry.value_ptr.*);
                     try result.defines.put(allocator, copied.name, copied);
                 }
@@ -154,29 +159,31 @@ fn parseDefinesFromText(
         }
 
         // Handle #ifdef (but not #ifndef, matched separately below)
-        if (std.mem.startsWith(u8, trimmed, "#ifdef")) {
+        if (std.mem.startsWith(u8, trimmed, "#ifdef") and (trimmed.len == 6 or !helpers.isIdentChar(trimmed[6]))) {
             if (cond_depth < 64) {
                 cond_stack[cond_depth] = false; // first branch
                 cond_depth += 1;
+            } else {
+                log.warn("conditional nesting exceeds 64 levels, tracking may be inaccurate", .{});
             }
             comment_lines.clearRetainingCapacity();
             continue;
         }
 
         // Handle #if (but not #ifdef/#ifndef)
-        if ((std.mem.startsWith(u8, trimmed, "#if ") or std.mem.startsWith(u8, trimmed, "#if\t")) and
-            !std.mem.startsWith(u8, trimmed, "#ifdef") and !std.mem.startsWith(u8, trimmed, "#ifndef"))
-        {
+        if (std.mem.startsWith(u8, trimmed, "#if ") or std.mem.startsWith(u8, trimmed, "#if\t")) {
             if (cond_depth < 64) {
                 cond_stack[cond_depth] = false; // first branch
                 cond_depth += 1;
+            } else {
+                log.warn("conditional nesting exceeds 64 levels, tracking may be inaccurate", .{});
             }
             comment_lines.clearRetainingCapacity();
             continue;
         }
 
         // Track #ifndef for include guard detection + conditional tracking
-        if (std.mem.startsWith(u8, trimmed, "#ifndef")) {
+        if (std.mem.startsWith(u8, trimmed, "#ifndef") and (trimmed.len == 7 or !helpers.isIdentChar(trimmed[7]))) {
             const rest_ifndef = std.mem.trimLeft(u8, trimmed[7..], " \t");
             var ifndef_end: usize = 0;
             while (ifndef_end < rest_ifndef.len and helpers.isIdentChar(rest_ifndef[ifndef_end])) {
@@ -188,12 +195,16 @@ fn parseDefinesFromText(
             if (cond_depth < 64) {
                 cond_stack[cond_depth] = false; // first branch
                 cond_depth += 1;
+            } else {
+                log.warn("conditional nesting exceeds 64 levels, tracking may be inaccurate", .{});
             }
             continue;
         }
 
         // Handle #else / #elif — flip to else branch
-        if (std.mem.startsWith(u8, trimmed, "#else") or std.mem.startsWith(u8, trimmed, "#elif")) {
+        if ((std.mem.startsWith(u8, trimmed, "#else") and (trimmed.len == 5 or !helpers.isIdentChar(trimmed[5]))) or
+            (std.mem.startsWith(u8, trimmed, "#elif") and (trimmed.len == 5 or !helpers.isIdentChar(trimmed[5]))))
+        {
             if (cond_depth > 0) {
                 const top = cond_depth - 1;
                 if (!cond_stack[top]) {
@@ -207,7 +218,7 @@ fn parseDefinesFromText(
         }
 
         // Handle #endif — pop conditional stack
-        if (std.mem.startsWith(u8, trimmed, "#endif")) {
+        if (std.mem.startsWith(u8, trimmed, "#endif") and (trimmed.len == 6 or !helpers.isIdentChar(trimmed[6]))) {
             if (cond_depth > 0) {
                 cond_depth -= 1;
                 if (cond_stack[cond_depth]) {
@@ -426,13 +437,10 @@ fn processInclude(
     const path_dupe = try allocator.dupe(u8, full_path);
     try visited.put(allocator, path_dupe, {});
 
-    // Read the file using page_allocator so content can be freed after parsing
-    // (all extracted data is duped into the arena before this function returns)
-    const content = std.fs.cwd().readFileAlloc(std.heap.page_allocator, full_path, 1024 * 1024) catch |err| {
+    const content = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch |err| {
         log.debug("failed to read include '{s}': {}", .{ full_path, err });
         return;
     };
-    defer std.heap.page_allocator.free(content);
 
     // Record the file's mtime for cache invalidation
     if (file_mtimes) |mtimes| {
@@ -533,7 +541,7 @@ pub fn formatHover(allocator: std.mem.Allocator, def: Define) ![]const u8 {
         try w.writeByte('\n');
     }
 
-    try w.print("\nDefined in {s}:{d}", .{ if (def.file.len == 0) "current file" else std.fs.path.basename(def.file), def.line });
+    try w.print("\nDefined in {s}:{d}", .{ if (def.isLocal()) "current file" else std.fs.path.basename(def.file), def.line });
 
     return out.written();
 }

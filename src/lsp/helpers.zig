@@ -1,6 +1,8 @@
 const std = @import("std");
 const parser = @import("../parsing/parser.zig");
 
+const log = std.log.scoped(.server);
+
 // JSON helper functions
 
 pub fn getObject(val: std.json.Value, key: []const u8) ?std.json.Value {
@@ -474,7 +476,12 @@ pub fn resolveIncludePath(buf: *[std.fs.max_path_bytes]u8, base_dir: []const u8,
     const inc_path = normalizeBackslashes(&inc_buf, raw_inc_path);
 
     // Build the full path: base_dir/inc_path
-    const full_path = std.fmt.bufPrint(buf, "{s}{c}{s}", .{ base_dir, std.fs.path.sep, inc_path }) catch return null;
+    // Strip trailing separator to avoid double-slash in joined path
+    const trimmed_dir = if (base_dir.len > 1 and base_dir[base_dir.len - 1] == std.fs.path.sep)
+        base_dir[0 .. base_dir.len - 1]
+    else
+        base_dir;
+    const full_path = std.fmt.bufPrint(buf, "{s}{c}{s}", .{ trimmed_dir, std.fs.path.sep, inc_path }) catch return null;
 
     // Fast path: exact match
     std.fs.cwd().access(full_path, .{}) catch {
@@ -546,10 +553,12 @@ fn normalizePath(buf: *[std.fs.max_path_bytes]u8, path: []const u8) []const u8 {
             if (count > 0) count -= 1;
             continue;
         }
-        if (count < components.len) {
-            components[count] = comp;
-            count += 1;
+        if (count >= components.len) {
+            log.warn("normalizePath: path has more than {d} components, truncating", .{components.len});
+            break;
         }
+        components[count] = comp;
+        count += 1;
     }
 
     // Reconstruct

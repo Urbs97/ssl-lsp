@@ -27,7 +27,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     };
 
     // Check if cursor is on a #include directive → jump to the included file
-    if (getIncludePath(doc.text, @intCast(pos.line))) |inc_path| {
+    if (getIncludePath(doc.text, @intCast(pos.line), @intCast(pos.character))) |inc_path| {
         const resolved = helpers.resolveUriToPath(allocator, uri);
         defer resolved.deinit();
         const file_path = resolved.path;
@@ -120,7 +120,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     // Search #define macros
     if (doc.defines) |*defs| {
         if (defs.lookupCaseInsensitive(word)) |def| {
-            const def_uri = if (def.file.len == 0)
+            const def_uri = if (def.isLocal())
                 uri
             else
                 try helpers.pathToUri(allocator, def.file);
@@ -142,8 +142,9 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
     try ctx.sendResponse(allocator, req_id, .null);
 }
 
-/// Extract the #include path from a given line, if it is a #include "..." directive.
-fn getIncludePath(text: []const u8, target_line: u32) ?[]const u8 {
+/// Extract the #include path from a given line, if it is a #include "..." directive
+/// and the cursor column falls within the directive (up to the closing quote).
+fn getIncludePath(text: []const u8, target_line: u32, cursor_col: u32) ?[]const u8 {
     var current_line: u32 = 0;
     var line_iter = std.mem.splitScalar(u8, text, '\n');
     while (line_iter.next()) |raw_line| : (current_line += 1) {
@@ -153,6 +154,11 @@ fn getIncludePath(text: []const u8, target_line: u32) ?[]const u8 {
         const rest = std.mem.trimLeft(u8, line_text[8..], " \t");
         if (rest.len == 0 or rest[0] != '"') return null;
         const end_quote = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
+        // Compute column of closing quote in the original (untrimmed) line
+        const trimmed_raw = std.mem.trimRight(u8, raw_line, "\r");
+        const leading_ws = trimmed_raw.len - line_text.len;
+        const close_quote_col = leading_ws + (line_text.len - rest.len) + end_quote;
+        if (cursor_col > close_quote_col) return null;
         return rest[1..end_quote];
     }
     return null;
