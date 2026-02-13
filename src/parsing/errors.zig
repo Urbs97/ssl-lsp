@@ -168,7 +168,10 @@ pub fn readErrors(allocator: std.mem.Allocator) !ErrorList {
         if (err == error.FileNotFound) return .{ .errors = &.{}, .allocator = allocator };
         return err;
     };
-    defer file.close();
+    defer {
+        file.close();
+        std.fs.cwd().deleteFile("errors.txt") catch {};
+    }
 
     var buf: [4096]u8 = undefined;
     var rdr = file.reader(&buf);
