@@ -3,6 +3,7 @@ const Context = @import("../context.zig").Context;
 const helpers = @import("../helpers.zig");
 const types = @import("../types.zig");
 const defines_mod = @import("../defines.zig");
+const builtins = @import("../builtins.zig");
 
 const log = std.log.scoped(.server);
 
@@ -80,6 +81,25 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         if (defs.lookup(word)) |def| {
             const md = try defines_mod.formatHover(allocator, def);
             const hover_result = types.Hover{ .contents = .{ .value = md } };
+            try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
+            return;
+        }
+    }
+
+    // Search built-in opcodes
+    for (builtins.opcodes()) |op| {
+        if (std.mem.eql(u8, op.name, word)) {
+            var out: std.Io.Writer.Allocating = .init(allocator);
+            const w = &out.writer;
+            try w.writeAll("```ssl\n");
+            try w.writeAll(op.signature);
+            try w.writeAll("\n```\n");
+            if (op.description.len > 0) {
+                try w.writeByte('\n');
+                try w.writeAll(op.description);
+                try w.writeByte('\n');
+            }
+            const hover_result = types.Hover{ .contents = .{ .value = out.written() } };
             try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));
             return;
         }
