@@ -31,20 +31,18 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
         const file_path = helpers.uriToPath(allocator, uri) catch uri;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full_path = helpers.resolveIncludePath(&path_buf, include_dir, inc_path) orelse {
-            try ctx.sendResponse(allocator, req_id, .null);
+        if (helpers.resolveIncludePath(&path_buf, include_dir, inc_path)) |full_path| {
+            const target_uri = try helpers.pathToUri(allocator, full_path);
+            const loc = types.Location{
+                .uri = target_uri,
+                .range = .{
+                    .start = .{ .line = 0, .character = 0 },
+                    .end = .{ .line = 0, .character = 0 },
+                },
+            };
+            try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
             return;
-        };
-        const target_uri = try helpers.pathToUri(allocator, full_path);
-        const loc = types.Location{
-            .uri = target_uri,
-            .range = .{
-                .start = .{ .line = 0, .character = 0 },
-                .end = .{ .line = 0, .character = 0 },
-            },
-        };
-        try ctx.sendResponse(allocator, req_id, try loc.toJson(allocator));
-        return;
+        }
     }
 
     const word = helpers.getWordAtPosition(doc.text, @intCast(pos.line), @intCast(pos.character)) orelse {

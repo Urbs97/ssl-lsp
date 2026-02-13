@@ -174,7 +174,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
             for (occurrences) |occ| {
                 // Skip the #define directive line itself for current-file defines
                 // to avoid duplicating the declaration
-                if (def.file.len == 0 and occ.line == def.line - 1) continue;
+                if (def.file.len == 0 and def.line > 0 and occ.line == def.line - 1) continue;
 
                 const loc = types.Location{
                     .uri = uri,

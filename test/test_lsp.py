@@ -979,6 +979,213 @@ def test_goto_definition_define_from_header():
     print(f"PASS: test_goto_definition_define_from_header (-> {result['uri'].split('/')[-1]}:{result['range']['start']['line']})")
 
 
+def test_hover_define():
+    """Hover on a #define macro shows its definition and source location."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX_HP;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_hover_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MAX_HP" in "    variable x := MAX_HP;" at line 3, character 18
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 60,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 60]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result, got null"
+    assert "contents" in result, f"Expected contents, got: {result}"
+
+    contents = result["contents"]["value"]
+    assert "#define MAX_HP 100" in contents, f"Expected '#define MAX_HP 100' in hover, got: {contents}"
+    assert "current file" in contents, f"Expected 'current file' in hover, got: {contents}"
+
+    print("PASS: test_hover_define")
+
+
+def test_hover_builtin():
+    """Hover on a built-in opcode shows its signature."""
+    ssl_text = (
+        "variable x;\n"
+        "\n"
+        "procedure start begin\n"
+        "    x := random(0, 10);\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_hover_builtin.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "random" in "    x := random(0, 10);" at line 3, character 9
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 61,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 9},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 61]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result, got null"
+    assert "contents" in result, f"Expected contents, got: {result}"
+
+    contents = result["contents"]["value"]
+    assert "random" in contents, f"Expected 'random' in hover, got: {contents}"
+
+    print("PASS: test_hover_builtin")
+
+
+def test_completion_defines():
+    """Completion returns #define macros matching a prefix."""
+    ssl_text = (
+        "#define MAX_HP 100\n"
+        "#define MAX_MP 50\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MAX\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_completion_defines.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "MAX" on line 4: "    variable x := MAX" → character 22
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 43,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 4, "character": 22},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 43]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+    assert "result" in comp_resp[0], f"Expected result, got: {comp_resp[0]}"
+
+    result = comp_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+
+    labels = [item["label"] for item in result]
+    assert "MAX_HP" in labels, f"Expected 'MAX_HP' in completions, got: {labels}"
+    assert "MAX_MP" in labels, f"Expected 'MAX_MP' in completions, got: {labels}"
+
+    by_label = {item["label"]: item for item in result}
+    # Object-like defines should have kind Constant (21)
+    assert by_label["MAX_HP"]["kind"] == 21, f"Expected Constant kind (21), got: {by_label['MAX_HP']['kind']}"
+    assert "#define" in by_label["MAX_HP"]["detail"], f"Expected '#define' in detail, got: {by_label['MAX_HP']['detail']}"
+
+    print(f"PASS: test_completion_defines ({len(result)} item(s))")
+
+
+def test_completion_define_function_like():
+    """Completion returns function-like #define macros with correct kind."""
+    ssl_text = (
+        "#define CALC(x, y) ((x) + (y))\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable z := CAL\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_completion_define_func.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "CAL" on line 3: "    variable z := CAL" → character 22
+    completion_req = {
+        "jsonrpc": "2.0",
+        "id": 44,
+        "method": "textDocument/completion",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 22},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, completion_req, *shutdown_messages())
+
+    comp_resp = [r for r in responses if r.get("id") == 44]
+    assert len(comp_resp) == 1, f"Expected completion response, got: {responses}"
+    assert "result" in comp_resp[0], f"Expected result, got: {comp_resp[0]}"
+
+    result = comp_resp[0]["result"]
+    assert isinstance(result, list), f"Expected array result, got: {type(result)}"
+
+    labels = [item["label"] for item in result]
+    assert "CALC" in labels, f"Expected 'CALC' in completions, got: {labels}"
+
+    by_label = {item["label"]: item for item in result}
+    # Function-like defines should have kind Function (3)
+    assert by_label["CALC"]["kind"] == 3, f"Expected Function kind (3), got: {by_label['CALC']['kind']}"
+    assert "#define CALC(x, y)" in by_label["CALC"]["detail"], f"Expected '#define CALC(x, y)' in detail, got: {by_label['CALC']['detail']}"
+
+    print(f"PASS: test_completion_define_function_like ({len(result)} item(s))")
+
+
 def test_find_references_define():
     """Find references on a #define macro returns its usages in the current file."""
     ssl_text = (
@@ -1061,6 +1268,10 @@ if __name__ == "__main__":
         test_find_references_procedure,
         test_find_references_variable,
         test_find_references_define,
+        test_hover_define,
+        test_hover_builtin,
+        test_completion_defines,
+        test_completion_define_function_like,
         test_completion_builtins,
         test_completion_user_symbols,
         test_completion_no_prefix,

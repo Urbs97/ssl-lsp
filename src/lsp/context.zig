@@ -133,8 +133,10 @@ pub const Context = struct {
             // Extract #define macros (cache header defines when includes haven't changed)
             const prev_defines: ?*const defines_mod.DefineSet = if (doc.defines) |*d| d else null;
             const new_defines = defines_mod.extractDefines(self.allocator, text, include_dir, prev_defines) catch null;
-            if (doc.defines) |*old_defs| old_defs.deinit();
-            doc.defines = new_defines;
+            if (new_defines != null) {
+                if (doc.defines) |*old_defs| old_defs.deinit();
+                doc.defines = new_defines;
+            }
         } else {
             // Document not in map (e.g. didClose clearing diagnostics) — clean up
             if (parse_result) |*pr| pr.deinit();
