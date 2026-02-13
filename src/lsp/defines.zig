@@ -1,6 +1,8 @@
 const std = @import("std");
 const helpers = @import("helpers.zig");
 
+const log = std.log.scoped(.server);
+
 pub const Define = struct {
     name: []const u8,
     params: ?[]const []const u8, // null = object-like; populated = function-like
@@ -117,6 +119,11 @@ fn parseDefinesFromText(
     defer comment_lines.deinit(allocator);
     var last_ifndef: ?[]const u8 = null; // track #ifndef for include guard detection
 
+    // Conditional compilation tracking: skip defines inside #else/#elif branches
+    var cond_depth: u32 = 0;
+    var cond_stack: [64]bool = .{false} ** 64; // true = currently in else branch
+    var else_depth: u32 = 0; // count of nesting levels currently in else branch
+
     var line_iter = std.mem.splitScalar(u8, text, '\n');
     while (line_iter.next()) |raw_line| {
         line_num += 1;
@@ -146,7 +153,29 @@ fn parseDefinesFromText(
             continue;
         }
 
-        // Track #ifndef for include guard detection
+        // Handle #ifdef (but not #ifndef, matched separately below)
+        if (std.mem.startsWith(u8, trimmed, "#ifdef")) {
+            if (cond_depth < 64) {
+                cond_stack[cond_depth] = false; // first branch
+                cond_depth += 1;
+            }
+            comment_lines.clearRetainingCapacity();
+            continue;
+        }
+
+        // Handle #if (but not #ifdef/#ifndef)
+        if ((std.mem.startsWith(u8, trimmed, "#if ") or std.mem.startsWith(u8, trimmed, "#if\t")) and
+            !std.mem.startsWith(u8, trimmed, "#ifdef") and !std.mem.startsWith(u8, trimmed, "#ifndef"))
+        {
+            if (cond_depth < 64) {
+                cond_stack[cond_depth] = false; // first branch
+                cond_depth += 1;
+            }
+            comment_lines.clearRetainingCapacity();
+            continue;
+        }
+
+        // Track #ifndef for include guard detection + conditional tracking
         if (std.mem.startsWith(u8, trimmed, "#ifndef")) {
             const rest_ifndef = std.mem.trimLeft(u8, trimmed[7..], " \t");
             var ifndef_end: usize = 0;
@@ -156,11 +185,57 @@ fn parseDefinesFromText(
             if (ifndef_end > 0) {
                 last_ifndef = rest_ifndef[0..ifndef_end];
             }
+            if (cond_depth < 64) {
+                cond_stack[cond_depth] = false; // first branch
+                cond_depth += 1;
+            }
+            continue;
+        }
+
+        // Handle #else / #elif — flip to else branch
+        if (std.mem.startsWith(u8, trimmed, "#else") or std.mem.startsWith(u8, trimmed, "#elif")) {
+            if (cond_depth > 0) {
+                const top = cond_depth - 1;
+                if (!cond_stack[top]) {
+                    // Transitioning from first branch to else branch
+                    cond_stack[top] = true;
+                    else_depth += 1;
+                }
+            }
+            comment_lines.clearRetainingCapacity();
+            continue;
+        }
+
+        // Handle #endif — pop conditional stack
+        if (std.mem.startsWith(u8, trimmed, "#endif")) {
+            if (cond_depth > 0) {
+                cond_depth -= 1;
+                if (cond_stack[cond_depth]) {
+                    // Was in else branch — decrement else_depth
+                    else_depth -= 1;
+                    cond_stack[cond_depth] = false;
+                }
+            }
+            comment_lines.clearRetainingCapacity();
             continue;
         }
 
         // Handle #define
         if (std.mem.startsWith(u8, trimmed, "#define")) {
+            // Skip defines inside #else/#elif branches
+            if (else_depth > 0) {
+                // Consume continuation lines so we don't misparse them
+                var skip_line = trimmed;
+                while (skip_line.len > 0 and skip_line[skip_line.len - 1] == '\\') {
+                    if (line_iter.next()) |cont_raw| {
+                        line_num += 1;
+                        skip_line = std.mem.trimRight(u8, cont_raw, "\r");
+                    } else break;
+                }
+                comment_lines.clearRetainingCapacity();
+                continue;
+            }
+
             const rest = trimmed[7..];
             if (rest.len == 0 or (rest[0] != ' ' and rest[0] != '\t')) {
                 comment_lines.clearRetainingCapacity();
@@ -341,15 +416,23 @@ fn processInclude(
 ) ParseError!void {
     // Resolve include path (handles backslashes and case-insensitive matching)
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const full_path = helpers.resolveIncludePath(&path_buf, include_dir, inc_path) orelse return;
+    const full_path = helpers.resolveIncludePath(&path_buf, include_dir, inc_path) orelse {
+        log.debug("could not resolve include path '{s}' in '{s}'", .{ inc_path, include_dir });
+        return;
+    };
 
     // Check visited
     if (visited.get(full_path) != null) return;
     const path_dupe = try allocator.dupe(u8, full_path);
     try visited.put(allocator, path_dupe, {});
 
-    // Read the file
-    const content = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch return;
+    // Read the file using page_allocator so content can be freed after parsing
+    // (all extracted data is duped into the arena before this function returns)
+    const content = std.fs.cwd().readFileAlloc(std.heap.page_allocator, full_path, 1024 * 1024) catch |err| {
+        log.debug("failed to read include '{s}': {}", .{ full_path, err });
+        return;
+    };
+    defer std.heap.page_allocator.free(content);
 
     // Record the file's mtime for cache invalidation
     if (file_mtimes) |mtimes| {
@@ -808,4 +891,85 @@ test "cache invalidated when header file mtime changes" {
     // Should have re-read from disk and found the new value
     try std.testing.expect(defs2.lookup("CACHED_VAL") != null);
     try std.testing.expectEqualStrings("2", defs2.lookup("CACHED_VAL").?.body);
+}
+
+test "ifdef/else keeps first branch defines" {
+    const allocator = std.testing.allocator;
+    const text =
+        \\#ifdef SOMETHING
+        \\#define VALUE 1
+        \\#else
+        \\#define VALUE 2
+        \\#endif
+        \\
+    ;
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    const def = defs.lookup("VALUE").?;
+    try std.testing.expectEqualStrings("1", def.body);
+}
+
+test "nested ifdef blocks" {
+    const allocator = std.testing.allocator;
+    const text =
+        \\#define OUTER 1
+        \\#ifdef FOO
+        \\#define INNER_IF 10
+        \\#ifdef BAR
+        \\#define NESTED_IF 20
+        \\#else
+        \\#define NESTED_ELSE 30
+        \\#endif
+        \\#else
+        \\#define OUTER_ELSE 40
+        \\#endif
+        \\#define AFTER 99
+        \\
+    ;
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    // Defines outside conditionals are kept
+    try std.testing.expectEqualStrings("1", defs.lookup("OUTER").?.body);
+    try std.testing.expectEqualStrings("99", defs.lookup("AFTER").?.body);
+
+    // First branches are kept
+    try std.testing.expect(defs.lookup("INNER_IF") != null);
+    try std.testing.expect(defs.lookup("NESTED_IF") != null);
+
+    // Else branches are skipped
+    try std.testing.expect(defs.lookup("NESTED_ELSE") == null);
+    try std.testing.expect(defs.lookup("OUTER_ELSE") == null);
+}
+
+test "define on last line without trailing newline" {
+    const allocator = std.testing.allocator;
+    const text = "#define LAST_LINE 42";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    const def = defs.lookup("LAST_LINE").?;
+    try std.testing.expectEqualStrings("42", def.body);
+}
+
+test "formatDetail truncates long body" {
+    const allocator = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+
+    // Create a define with a body > 80 chars
+    const long_body = "a" ** 100;
+    const def = Define{
+        .name = "LONG",
+        .params = null,
+        .body = long_body,
+        .file = "",
+        .line = 1,
+        .doc_comment = null,
+    };
+    const detail = try formatDetail(arena.allocator(), def);
+    // Should be "#define LONG " + 80 chars + "..."
+    try std.testing.expect(std.mem.endsWith(u8, detail, "..."));
+    try std.testing.expect(detail.len == "#define LONG ".len + 80 + 3);
 }

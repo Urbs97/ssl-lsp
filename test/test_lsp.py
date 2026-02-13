@@ -1250,6 +1250,156 @@ def test_find_references_define():
     print(f"PASS: test_find_references_define ({len(result)} location(s))")
 
 
+def test_nested_includes():
+    """Hover resolves defines from transitive includes (A.h -> B.h)."""
+    test_dir = os.path.dirname(os.path.abspath(__file__))
+    real_path = os.path.join(test_dir, "test_nested_includes.ssl")
+    uri = "file://" + real_path
+    ssl_text = '#include "headers/nested_a.h"\n\nprocedure start begin\n    variable x := FROM_B;\nend\n'
+
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "FROM_B" at line 3, character 18
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 70,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 70]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result for transitive include define, got null"
+    contents = result["contents"]["value"]
+    assert "#define FROM_B 2" in contents, f"Expected '#define FROM_B 2' in hover, got: {contents}"
+    assert "nested_b.h" in contents, f"Expected 'nested_b.h' in hover source, got: {contents}"
+
+    print("PASS: test_nested_includes")
+
+
+def test_signature_help_define_macro():
+    """Signature help shows params for a function-like #define macro."""
+    ssl_text = (
+        "#define CALC(x, y) ((x) + (y))\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable z := CALC(\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_sighelp_define.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor after "CALC(" on line 3: "    variable z := CALC(" → character 23
+    sig_req = {
+        "jsonrpc": "2.0",
+        "id": 71,
+        "method": "textDocument/signatureHelp",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 3, "character": 23},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, sig_req, *shutdown_messages())
+
+    sig_resp = [r for r in responses if r.get("id") == 71]
+    assert len(sig_resp) == 1, f"Expected signatureHelp response, got: {responses}"
+    assert "result" in sig_resp[0], f"Expected result, got: {sig_resp[0]}"
+
+    result = sig_resp[0]["result"]
+    assert result is not None, "Expected SignatureHelp for define macro, got null"
+    assert "signatures" in result, f"Expected signatures, got: {result}"
+    assert len(result["signatures"]) == 1, f"Expected 1 signature, got: {len(result['signatures'])}"
+
+    sig = result["signatures"][0]
+    assert "CALC" in sig["label"], f"Expected 'CALC' in label, got: {sig['label']}"
+    assert "parameters" in sig, f"Expected parameters, got: {sig}"
+    assert len(sig["parameters"]) == 2, f"Expected 2 parameters (x, y), got: {len(sig['parameters'])}"
+    assert result["activeParameter"] == 0, f"Expected activeParameter 0, got: {result['activeParameter']}"
+
+    print(f"PASS: test_signature_help_define_macro (label: {sig['label']})")
+
+
+def test_ifdef_else_conditional():
+    """Hover shows first-branch value, not else-branch value."""
+    ssl_text = (
+        "#ifdef SOMETHING\n"
+        "#define MODE 1\n"
+        "#else\n"
+        "#define MODE 2\n"
+        "#endif\n"
+        "\n"
+        "procedure start begin\n"
+        "    variable x := MODE;\n"
+        "end\n"
+    )
+    uri = "file:///tmp/test_ifdef_else.ssl"
+    did_open = {
+        "jsonrpc": "2.0",
+        "method": "textDocument/didOpen",
+        "params": {
+            "textDocument": {
+                "uri": uri,
+                "languageId": "ssl",
+                "version": 1,
+                "text": ssl_text,
+            }
+        },
+    }
+    # Cursor on "MODE" at line 7, character 18
+    hover_req = {
+        "jsonrpc": "2.0",
+        "id": 72,
+        "method": "textDocument/hover",
+        "params": {
+            "textDocument": {"uri": uri},
+            "position": {"line": 7, "character": 18},
+        },
+    }
+
+    responses, stderr, code = run_lsp(*init_messages(), did_open, hover_req, *shutdown_messages())
+
+    hover_resp = [r for r in responses if r.get("id") == 72]
+    assert len(hover_resp) == 1, f"Expected hover response, got: {responses}"
+    assert "result" in hover_resp[0], f"Expected result, got: {hover_resp[0]}"
+
+    result = hover_resp[0]["result"]
+    assert result is not None, "Expected hover result for ifdef/else define, got null"
+    contents = result["contents"]["value"]
+    # Should show first-branch value (1), not else-branch (2)
+    assert "#define MODE 1" in contents, f"Expected '#define MODE 1' in hover, got: {contents}"
+
+    print("PASS: test_ifdef_else_conditional")
+
+
 if __name__ == "__main__":
     tests = [
         test_initialize,
@@ -1280,6 +1430,9 @@ if __name__ == "__main__":
         test_signature_help_builtin_second_param,
         test_signature_help_user_procedure,
         test_signature_help_not_in_call,
+        test_nested_includes,
+        test_signature_help_define_macro,
+        test_ifdef_else_conditional,
     ]
 
     passed = 0
