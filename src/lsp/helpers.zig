@@ -464,6 +464,154 @@ pub fn formatVarHover(allocator: std.mem.Allocator, v: parser.Variable, proc_nam
     return out.written();
 }
 
+/// Resolve an include path relative to a base directory, handling Windows backslashes.
+/// Returns the resolved path in `buf`, or null if the file cannot be found.
+/// Falls back to case-insensitive matching for each path component (needed for
+/// Windows-originated SSL scripts running on case-sensitive Linux filesystems).
+pub fn resolveIncludePath(buf: *[std.fs.max_path_bytes]u8, base_dir: []const u8, raw_inc_path: []const u8) ?[]const u8 {
+    // Normalize backslashes to forward slashes
+    var inc_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const inc_path = normalizeBackslashes(&inc_buf, raw_inc_path);
+
+    // Build the full path: base_dir/inc_path
+    const full_path = std.fmt.bufPrint(buf, "{s}{c}{s}", .{ base_dir, std.fs.path.sep, inc_path }) catch return null;
+
+    // Fast path: exact match
+    std.fs.cwd().access(full_path, .{}) catch {
+        // Slow path: case-insensitive component-by-component resolution
+        return resolveCaseInsensitive(buf, full_path);
+    };
+    return full_path;
+}
+
+/// Walk each component of `path` from the root, matching directory entries
+/// case-insensitively. Returns the resolved real path in `buf`, or null if
+/// no match is found.
+fn resolveCaseInsensitive(buf: *[std.fs.max_path_bytes]u8, path: []const u8) ?[]const u8 {
+    // Normalize away ".." and "." segments first
+    var norm_buf: [std.fs.max_path_bytes]u8 = undefined;
+    const normalized = normalizePath(&norm_buf, path);
+
+    // Split into components (skip leading '/' — we'll reconstruct from root)
+    const relative = if (normalized.len > 0 and normalized[0] == '/') normalized[1..] else normalized;
+    if (relative.len == 0) return null;
+
+    // Build resolved path in buf, starting from root "/"
+    var out_len: usize = 0;
+
+    var comp_iter = std.mem.splitScalar(u8, relative, '/');
+    while (comp_iter.next()) |component| {
+        if (component.len == 0) continue;
+
+        // Current directory to search in
+        const search_dir = if (out_len == 0) "/" else buf[0..out_len];
+
+        // Try exact match first
+        const exact_len = out_len + 1 + component.len;
+        if (exact_len <= buf.len) {
+            buf[out_len] = '/';
+            @memcpy(buf[out_len + 1 ..][0..component.len], component);
+            std.fs.cwd().access(buf[0..exact_len], .{}) catch {
+                // Exact match failed — scan directory for case-insensitive match
+                if (findCaseInsensitiveEntry(search_dir, component)) |real_name| {
+                    buf[out_len] = '/';
+                    @memcpy(buf[out_len + 1 ..][0..real_name.len], real_name);
+                    out_len += 1 + real_name.len;
+                    continue;
+                }
+                return null;
+            };
+            out_len = exact_len;
+            continue;
+        }
+        return null;
+    }
+
+    if (out_len == 0) return null;
+
+    // Verify the final path actually exists
+    std.fs.cwd().access(buf[0..out_len], .{}) catch return null;
+    return buf[0..out_len];
+}
+
+/// Normalize a path by resolving "." and ".." segments in place.
+fn normalizePath(buf: *[std.fs.max_path_bytes]u8, path: []const u8) []const u8 {
+    var components: [256][]const u8 = undefined;
+    var count: usize = 0;
+    const is_absolute = path.len > 0 and path[0] == '/';
+
+    var iter = std.mem.splitScalar(u8, path, '/');
+    while (iter.next()) |comp| {
+        if (comp.len == 0 or std.mem.eql(u8, comp, ".")) continue;
+        if (std.mem.eql(u8, comp, "..")) {
+            if (count > 0) count -= 1;
+            continue;
+        }
+        if (count < components.len) {
+            components[count] = comp;
+            count += 1;
+        }
+    }
+
+    // Reconstruct
+    var out_len: usize = 0;
+    if (is_absolute) {
+        buf[0] = '/';
+        out_len = 1;
+    }
+    for (components[0..count], 0..) |comp, i| {
+        if (i > 0 or is_absolute) {
+            if (out_len > 1 or !is_absolute) {
+                buf[out_len] = '/';
+                out_len += 1;
+            }
+        }
+        @memcpy(buf[out_len..][0..comp.len], comp);
+        out_len += comp.len;
+    }
+    return buf[0..out_len];
+}
+
+/// Scan a directory for an entry matching `name` case-insensitively.
+/// Returns the actual entry name (pointing into an iterable dir entry buffer)
+/// only valid until the next directory iteration. We copy it into a static buf.
+fn findCaseInsensitiveEntry(dir_path: []const u8, name: []const u8) ?[]const u8 {
+    const dir = std.fs.cwd().openDir(dir_path, .{ .iterate = true }) catch return null;
+    // dir is a value type in Zig's std, but we need to iterate — use a mutable copy
+    var mutable_dir = dir;
+    defer mutable_dir.close();
+
+    var it = mutable_dir.iterate();
+    while (it.next() catch return null) |entry| {
+        if (std.ascii.eqlIgnoreCase(entry.name, name)) {
+            // Copy into a thread-local buffer so the result outlives the iterator
+            const S = struct {
+                threadlocal var entry_buf: [std.fs.max_path_bytes]u8 = undefined;
+            };
+            if (entry.name.len > S.entry_buf.len) return null;
+            @memcpy(S.entry_buf[0..entry.name.len], entry.name);
+            return S.entry_buf[0..entry.name.len];
+        }
+    }
+    return null;
+}
+
+/// Replace backslashes with forward slashes for cross-platform path compatibility.
+fn normalizeBackslashes(buf: []u8, path: []const u8) []const u8 {
+    if (std.mem.indexOfScalar(u8, path, '\\') == null) return path;
+    const len = @min(path.len, buf.len);
+    @memcpy(buf[0..len], path[0..len]);
+    std.mem.replaceScalar(u8, buf[0..len], '\\', '/');
+    return buf[0..len];
+}
+
+/// Convert a file:// URI to a filesystem path, decoding percent-encoded characters.
+pub fn uriToPath(allocator: std.mem.Allocator, uri: []const u8) ![]const u8 {
+    const encoded = if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+    const component = std.Uri.Component{ .percent_encoded = encoded };
+    return component.toRawMaybeAlloc(allocator);
+}
+
 /// Construct a file:// URI from an absolute filesystem path.
 /// Percent-encodes characters that are not valid in URI paths (spaces, #, etc.).
 pub fn pathToUri(allocator: std.mem.Allocator, path: []const u8) ![]const u8 {
@@ -585,4 +733,80 @@ test "parseSignatureParams zero args" {
     const params = parseSignatureParams(std.testing.allocator, "void cleanup()").?;
     defer std.testing.allocator.free(params);
     try std.testing.expectEqual(@as(usize, 0), params.len);
+}
+
+test "uriToPath decodes percent-encoded characters" {
+    const path = try uriToPath(std.testing.allocator, "file:///home/user/my%20project/file.ssl");
+    defer std.testing.allocator.free(path);
+    try std.testing.expectEqualStrings("/home/user/my project/file.ssl", path);
+}
+
+test "uriToPath with no encoding" {
+    const path = try uriToPath(std.testing.allocator, "file:///home/user/project/file.ssl");
+    // No allocation when no percent-encoding is present — don't free
+    try std.testing.expectEqualStrings("/home/user/project/file.ssl", path);
+}
+
+test "resolveIncludePath case-insensitive fallback" {
+    // Create a temp directory structure: /tmp/ssl_test_ci/HEADERS/SCENEPID.H
+    const base = "/tmp/ssl_test_ci";
+    std.fs.cwd().makePath(base ++ "/HEADERS") catch {};
+    defer std.fs.cwd().deleteTree(base) catch {};
+
+    // Create test file
+    {
+        const f = std.fs.cwd().createFile(base ++ "/HEADERS/SCENEPID.H", .{}) catch return;
+        f.close();
+    }
+
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+
+    // Exact case should work
+    const exact = resolveIncludePath(&buf, base, "HEADERS/SCENEPID.H");
+    try std.testing.expect(exact != null);
+
+    // Wrong case should also resolve via case-insensitive fallback
+    var buf2: [std.fs.max_path_bytes]u8 = undefined;
+    const ci = resolveIncludePath(&buf2, base, "headers/ScenePid.h");
+    try std.testing.expect(ci != null);
+
+    // Both should point to the same actual file
+    if (exact) |e| {
+        if (ci) |c| {
+            try std.testing.expectEqualStrings(e, c);
+        }
+    }
+}
+
+test "resolveIncludePath case-insensitive with dotdot" {
+    // Create: /tmp/ssl_test_ci2/HEADERS/SCENEPID.H
+    const base = "/tmp/ssl_test_ci2";
+    std.fs.cwd().makePath(base ++ "/HEADERS") catch {};
+    std.fs.cwd().makePath(base ++ "/MAPS") catch {};
+    defer std.fs.cwd().deleteTree(base) catch {};
+
+    {
+        const f = std.fs.cwd().createFile(base ++ "/HEADERS/SCENEPID.H", .{}) catch return;
+        f.close();
+    }
+
+    // Resolve "..\headers\ScenePid.h" from the MAPS directory (simulating DEFINE.H's include
+    // being resolved from the included file's directory)
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const result = resolveIncludePath(&buf, base ++ "/HEADERS", "..\\headers\\ScenePid.h");
+    try std.testing.expect(result != null);
+    // Should contain HEADERS/SCENEPID.H (the real casing)
+    try std.testing.expect(std.mem.endsWith(u8, result.?, "/HEADERS/SCENEPID.H"));
+}
+
+test "normalizePath resolves dotdot" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const result = normalizePath(&buf, "/foo/bar/../baz/./qux");
+    try std.testing.expectEqualStrings("/foo/baz/qux", result);
+}
+
+test "normalizePath absolute simple" {
+    var buf: [std.fs.max_path_bytes]u8 = undefined;
+    const result = normalizePath(&buf, "/a/b/c");
+    try std.testing.expectEqualStrings("/a/b/c", result);
 }

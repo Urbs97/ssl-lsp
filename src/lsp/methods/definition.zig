@@ -28,15 +28,10 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Check if cursor is on a #include directive → jump to the included file
     if (getIncludePath(doc.text, @intCast(pos.line))) |inc_path| {
-        const file_path = if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+        const file_path = helpers.uriToPath(allocator, uri) catch uri;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-        const full_path = std.fmt.bufPrint(&path_buf, "{s}{c}{s}", .{ include_dir, std.fs.path.sep, inc_path }) catch {
-            try ctx.sendResponse(allocator, req_id, .null);
-            return;
-        };
-        // Verify the file exists
-        std.fs.cwd().access(full_path, .{}) catch {
+        const full_path = helpers.resolveIncludePath(&path_buf, include_dir, inc_path) orelse {
             try ctx.sendResponse(allocator, req_id, .null);
             return;
         };
@@ -174,3 +169,4 @@ fn getIncludePath(text: []const u8, line: u32) ?[]const u8 {
     const end_quote = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
     return rest[1..end_quote];
 }
+

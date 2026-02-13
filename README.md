@@ -10,10 +10,10 @@ A Language Server and linter for Fallout SSL (Star-Trek Scripting Language) scri
   - Document symbols (procedure/variable outline)
   - Go to definition (procedures, variables, `#define` macros, `#include` files)
   - Find references (procedures, variables, `#define` macros)
-  - Hover information (signature, doc comments, line range, reference count)
+  - Hover information (built-in opcodes, procedures, variables, `#define` macros)
   - Completion (built-in opcodes, user-defined procedures/variables, `#define` macros)
   - Signature help (parameter hints for built-in opcodes, user-defined procedures, and function-like macros)
-  - `#define`/`#include` support (recursive header parsing, macro expansion display, doc comments)
+  - `#define`/`#include` support (recursive header parsing, case-insensitive path resolution, doc comments)
 
 ### Planned
 - Go to definition for built-in opcodes

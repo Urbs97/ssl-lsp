@@ -162,6 +162,7 @@ fn parseDefinesFromText(
             }
 
             // Join continuation lines for the body
+            const define_line = line_num; // capture start line before continuations
             var body_buf = std.ArrayListUnmanaged(u8){};
             defer body_buf.deinit(allocator);
             try body_buf.appendSlice(allocator, body_start);
@@ -206,7 +207,7 @@ fn parseDefinesFromText(
                 .params = params,
                 .body = body,
                 .file = filename,
-                .line = line_num,
+                .line = define_line,
                 .doc_comment = doc_comment,
             };
 
@@ -272,9 +273,9 @@ fn processInclude(
     visited: *std.StringHashMapUnmanaged(void),
     include_dir: []const u8,
 ) ParseError!void {
-    // Build full path
+    // Resolve include path (handles backslashes and case-insensitive matching)
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
-    const full_path = try std.fmt.bufPrint(&path_buf, "{s}{c}{s}", .{ include_dir, std.fs.path.sep, inc_path });
+    const full_path = helpers.resolveIncludePath(&path_buf, include_dir, inc_path) orelse return;
 
     // Check visited
     if (visited.get(full_path) != null) return;
@@ -284,7 +285,11 @@ fn processInclude(
     // Read the file
     const content = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch return;
 
-    try parseDefinesFromText(allocator, defines, content, path_dupe, visited, include_dir);
+    // Use the included file's directory for resolving its own nested includes
+    const nested_include_dir = std.fs.path.dirname(full_path) orelse include_dir;
+    const nested_dir_dupe = try allocator.dupe(u8, nested_include_dir);
+
+    try parseDefinesFromText(allocator, defines, content, path_dupe, visited, nested_dir_dupe);
 }
 
 /// Parse comma-separated parameter names from the text between ( and ).

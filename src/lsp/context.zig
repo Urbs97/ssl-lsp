@@ -1,6 +1,7 @@
 const std = @import("std");
 const transport = @import("transport.zig");
 const types = @import("types.zig");
+const helpers = @import("helpers.zig");
 const errors = @import("../parsing/errors.zig");
 const parser = @import("../parsing/parser.zig");
 const defines_mod = @import("defines.zig");
@@ -113,11 +114,11 @@ pub const Context = struct {
         }
 
         // Resolve the original file's directory for include file resolution
-        const file_path = if (std.mem.startsWith(u8, uri, "file://")) uri[7..] else uri;
+        const file_path = helpers.uriToPath(allocator, uri) catch uri;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
 
         // Run the parser using self.allocator so ParseResult outlives the arena
-        var parse_result = parser.parse(self.allocator, tmp_path, tmp_path, include_dir) catch |err| blk: {
+        var parse_result = parser.parse(self.allocator, tmp_path, file_path, include_dir) catch |err| blk: {
             log.debug("parser failed: {}", .{err});
             break :blk null;
         };
