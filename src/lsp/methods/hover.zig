@@ -78,7 +78,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Search #define macros
     if (doc.defines) |*defs| {
-        if (defs.lookup(word)) |def| {
+        if (defs.lookupCaseInsensitive(word)) |def| {
             const md = try defines_mod.formatHover(allocator, def);
             const hover_result = types.Hover{ .contents = .{ .value = md } };
             try ctx.sendResponse(allocator, req_id, try hover_result.toJson(allocator));

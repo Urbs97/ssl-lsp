@@ -10,10 +10,16 @@ pub const Define = struct {
     doc_comment: ?[]const u8, // preceding // comments
 };
 
+pub const FileMtime = struct {
+    path: []const u8,
+    mtime: i128,
+};
+
 pub const DefineSet = struct {
     arena: std.heap.ArenaAllocator,
     defines: std.StringHashMapUnmanaged(Define),
     include_hash: u64 = 0, // hash of #include lines for cache invalidation
+    file_mtimes: std.ArrayListUnmanaged(FileMtime) = .empty,
 
     pub fn init(child_allocator: std.mem.Allocator) DefineSet {
         return .{
@@ -33,6 +39,18 @@ pub const DefineSet = struct {
         return self.defines.get(name);
     }
 
+    /// Look up a define by name, falling back to case-insensitive matching.
+    pub fn lookupCaseInsensitive(self: *const DefineSet, name: []const u8) ?Define {
+        // Try exact match first (fast path)
+        if (self.defines.get(name)) |def| return def;
+        // Fall back to linear scan with case-insensitive comparison
+        var it = self.defines.iterator();
+        while (it.next()) |entry| {
+            if (std.ascii.eqlIgnoreCase(entry.key_ptr.*, name)) return entry.value_ptr.*;
+        }
+        return null;
+    }
+
     pub fn count(self: *const DefineSet) u32 {
         return self.defines.count();
     }
@@ -50,9 +68,9 @@ pub fn extractDefines(child_allocator: std.mem.Allocator, document_text: []const
     const allocator = result.arena.allocator();
     result.include_hash = computeIncludeHash(document_text);
 
-    // If includes haven't changed, copy header defines from previous and only re-parse document
+    // If includes haven't changed and header files haven't been modified, reuse cached defines
     if (previous) |prev| {
-        if (prev.include_hash == result.include_hash) {
+        if (prev.include_hash == result.include_hash and mtimesStillValid(prev.file_mtimes.items)) {
             // Copy header defines (file.len != 0) from previous set
             var it = prev.defines.iterator();
             while (it.next()) |entry| {
@@ -61,8 +79,15 @@ pub fn extractDefines(child_allocator: std.mem.Allocator, document_text: []const
                     try result.defines.put(allocator, copied.name, copied);
                 }
             }
+            // Copy file mtimes from previous set
+            for (prev.file_mtimes.items) |entry| {
+                try result.file_mtimes.append(allocator, .{
+                    .path = try allocator.dupe(u8, entry.path),
+                    .mtime = entry.mtime,
+                });
+            }
             // Parse only document-local defines (skip includes)
-            try parseDefinesFromText(allocator, &result.defines, document_text, "", null, include_dir);
+            try parseDefinesFromText(allocator, &result.defines, document_text, "", null, include_dir, null);
             return result;
         }
     }
@@ -71,7 +96,7 @@ pub fn extractDefines(child_allocator: std.mem.Allocator, document_text: []const
     var visited = std.StringHashMapUnmanaged(void){};
     defer visited.deinit(allocator);
 
-    try parseDefinesFromText(allocator, &result.defines, document_text, "", &visited, include_dir);
+    try parseDefinesFromText(allocator, &result.defines, document_text, "", &visited, include_dir, &result.file_mtimes);
 
     return result;
 }
@@ -85,10 +110,12 @@ fn parseDefinesFromText(
     filename: []const u8,
     visited: ?*std.StringHashMapUnmanaged(void),
     include_dir: []const u8,
+    file_mtimes: ?*std.ArrayListUnmanaged(FileMtime),
 ) ParseError!void {
     var line_num: u32 = 0;
     var comment_lines = std.ArrayListUnmanaged([]const u8){};
     defer comment_lines.deinit(allocator);
+    var last_ifndef: ?[]const u8 = null; // track #ifndef for include guard detection
 
     var line_iter = std.mem.splitScalar(u8, text, '\n');
     while (line_iter.next()) |raw_line| {
@@ -112,9 +139,22 @@ fn parseDefinesFromText(
                 if (rest.len > 0 and rest[0] == '"') {
                     if (std.mem.indexOfScalarPos(u8, rest, 1, '"')) |end_quote| {
                         const inc_path = rest[1..end_quote];
-                        try processInclude(allocator, defines, inc_path, v, include_dir);
+                        try processInclude(allocator, defines, inc_path, v, include_dir, file_mtimes);
                     }
                 }
+            }
+            continue;
+        }
+
+        // Track #ifndef for include guard detection
+        if (std.mem.startsWith(u8, trimmed, "#ifndef")) {
+            const rest_ifndef = std.mem.trimLeft(u8, trimmed[7..], " \t");
+            var ifndef_end: usize = 0;
+            while (ifndef_end < rest_ifndef.len and helpers.isIdentChar(rest_ifndef[ifndef_end])) {
+                ifndef_end += 1;
+            }
+            if (ifndef_end > 0) {
+                last_ifndef = rest_ifndef[0..ifndef_end];
             }
             continue;
         }
@@ -185,11 +225,19 @@ fn parseDefinesFromText(
 
             const body = try allocator.dupe(u8, body_buf.items);
 
-            // Skip include guards: empty body + name ends with _H
-            if (body.len == 0 and std.mem.endsWith(u8, name, "_H")) {
-                comment_lines.clearRetainingCapacity();
-                continue;
+            // Skip include guards: empty body + (matches preceding #ifndef OR name ends with _H)
+            if (body.len == 0) {
+                const is_guard = if (last_ifndef) |ifndef_name|
+                    std.mem.eql(u8, name, ifndef_name)
+                else
+                    false;
+                if (is_guard or std.mem.endsWith(u8, name, "_H")) {
+                    last_ifndef = null;
+                    comment_lines.clearRetainingCapacity();
+                    continue;
+                }
             }
+            last_ifndef = null;
 
             // Build doc comment
             var doc_comment: ?[]const u8 = null;
@@ -241,6 +289,23 @@ fn computeIncludeHash(text: []const u8) u64 {
     return hasher.final();
 }
 
+/// Get the mtime of a file, or null if the file cannot be stat'd.
+fn getFileMtime(path: []const u8) ?i128 {
+    const file = std.fs.cwd().openFile(path, .{}) catch return null;
+    defer file.close();
+    const stat = file.stat() catch return null;
+    return stat.mtime;
+}
+
+/// Check if all previously recorded file mtimes are still valid.
+fn mtimesStillValid(mtimes: []const FileMtime) bool {
+    for (mtimes) |entry| {
+        const current = getFileMtime(entry.path) orelse return false;
+        if (current != entry.mtime) return false;
+    }
+    return true;
+}
+
 /// Deep-copy a Define, duplicating all string fields into the given allocator.
 fn copyDefine(allocator: std.mem.Allocator, def: Define) !Define {
     const name = try allocator.dupe(u8, def.name);
@@ -272,6 +337,7 @@ fn processInclude(
     inc_path: []const u8,
     visited: *std.StringHashMapUnmanaged(void),
     include_dir: []const u8,
+    file_mtimes: ?*std.ArrayListUnmanaged(FileMtime),
 ) ParseError!void {
     // Resolve include path (handles backslashes and case-insensitive matching)
     var path_buf: [std.fs.max_path_bytes]u8 = undefined;
@@ -285,11 +351,18 @@ fn processInclude(
     // Read the file
     const content = std.fs.cwd().readFileAlloc(allocator, full_path, 1024 * 1024) catch return;
 
+    // Record the file's mtime for cache invalidation
+    if (file_mtimes) |mtimes| {
+        if (getFileMtime(full_path)) |mtime| {
+            try mtimes.append(allocator, .{ .path = path_dupe, .mtime = mtime });
+        }
+    }
+
     // Use the included file's directory for resolving its own nested includes
     const nested_include_dir = std.fs.path.dirname(full_path) orelse include_dir;
     const nested_dir_dupe = try allocator.dupe(u8, nested_include_dir);
 
-    try parseDefinesFromText(allocator, defines, content, path_dupe, visited, nested_dir_dupe);
+    try parseDefinesFromText(allocator, defines, content, path_dupe, visited, nested_dir_dupe, file_mtimes);
 }
 
 /// Parse comma-separated parameter names from the text between ( and ).
@@ -339,15 +412,12 @@ pub fn formatDetail(allocator: std.mem.Allocator, def: Define) ![]const u8 {
     if (def.body.len > 0) {
         try w.writeByte(' ');
         // Flatten newlines and truncate long bodies for display
-        const body_flat = try allocator.dupe(u8, def.body);
-        for (body_flat) |*ch| {
-            if (ch.* == '\n') ch.* = ' ';
+        const limit = @min(def.body.len, 80);
+        for (def.body[0..limit]) |ch| {
+            try w.writeByte(if (ch == '\n') ' ' else ch);
         }
-        if (body_flat.len > 80) {
-            try w.writeAll(body_flat[0..77]);
+        if (def.body.len > 80) {
             try w.writeAll("...");
-        } else {
-            try w.writeAll(body_flat);
         }
     }
     return out.written();
@@ -450,6 +520,37 @@ test "skip include guards" {
 
     try std.testing.expect(defs.lookup("SFALL_H") == null);
     try std.testing.expect(defs.lookup("FOO") != null);
+}
+
+test "skip include guard with non-_H suffix (H_DIK pattern)" {
+    const allocator = std.testing.allocator;
+    const text = "#ifndef H_DIK\n#define H_DIK\n#define DIK_ESCAPE 1\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    try std.testing.expect(defs.lookup("H_DIK") == null);
+    try std.testing.expect(defs.lookup("DIK_ESCAPE") != null);
+}
+
+test "skip include guard with _H suffix even without #ifndef" {
+    const allocator = std.testing.allocator;
+    // _H suffix fallback still works without a preceding #ifndef
+    const text = "#define DEFINE_LITE_H\n#define FOO 1\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    try std.testing.expect(defs.lookup("DEFINE_LITE_H") == null);
+    try std.testing.expect(defs.lookup("FOO") != null);
+}
+
+test "empty-body define without #ifndef is preserved when no _H suffix" {
+    const allocator = std.testing.allocator;
+    const text = "#define EMPTY_FLAG\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    // No #ifndef and no _H suffix — should be preserved
+    try std.testing.expect(defs.lookup("EMPTY_FLAG") != null);
 }
 
 test "doc comment extraction" {
@@ -571,6 +672,18 @@ test "parse defines from real headers" {
     try std.testing.expect(defs.count() > 50);
 }
 
+test "parse defines from dik.h skips H_DIK guard" {
+    const allocator = std.testing.allocator;
+    const text = "#include \"headers/dik.h\"\n";
+    var defs = try extractDefines(allocator, text, "test", null);
+    defer defs.deinit();
+
+    // Guard should be skipped
+    try std.testing.expect(defs.lookup("H_DIK") == null);
+    // Actual defines should be present
+    try std.testing.expect(defs.lookup("DIK_ESCAPE") != null);
+}
+
 test "cache reuses header defines when includes unchanged" {
     const allocator = std.testing.allocator;
     const text1 = "#include \"headers/sfall.h\"\n#define LOCAL1 1\n";
@@ -611,4 +724,88 @@ test "cache invalidated when includes change" {
     try std.testing.expect(defs1.include_hash != defs2.include_hash);
     // Should have defines from the new header
     try std.testing.expect(defs2.lookup("start_proc") != null);
+}
+
+test "lookupCaseInsensitive exact match" {
+    const allocator = std.testing.allocator;
+    const text = "#define WORLDMAP (0x1)\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    const def = defs.lookupCaseInsensitive("WORLDMAP").?;
+    try std.testing.expectEqualStrings("WORLDMAP", def.name);
+}
+
+test "lookupCaseInsensitive lowercase match" {
+    const allocator = std.testing.allocator;
+    const text = "#define WORLDMAP (0x1)\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    const def = defs.lookupCaseInsensitive("worldmap").?;
+    try std.testing.expectEqualStrings("WORLDMAP", def.name);
+}
+
+test "lookupCaseInsensitive mixed case match" {
+    const allocator = std.testing.allocator;
+    const text = "#define WorldMap (0x1)\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    const def = defs.lookupCaseInsensitive("WORLDMAP").?;
+    try std.testing.expectEqualStrings("WorldMap", def.name);
+}
+
+test "lookupCaseInsensitive non-existent" {
+    const allocator = std.testing.allocator;
+    const text = "#define FOO 1\n";
+    var defs = try extractDefines(allocator, text, ".", null);
+    defer defs.deinit();
+
+    try std.testing.expect(defs.lookupCaseInsensitive("BAR") == null);
+}
+
+test "cache invalidated when header file mtime changes" {
+    const allocator = std.testing.allocator;
+    const tmp_dir = "/tmp/ssl_mtime_test";
+    std.fs.cwd().makePath(tmp_dir ++ "/headers") catch {};
+    defer std.fs.cwd().deleteTree(tmp_dir) catch {};
+
+    // Create initial header
+    {
+        const f = std.fs.cwd().createFile(tmp_dir ++ "/headers/test.h", .{}) catch return;
+        defer f.close();
+        var buf: [256]u8 = undefined;
+        var w = f.writer(&buf);
+        w.interface.writeAll("#define CACHED_VAL 1\n") catch return;
+        w.interface.flush() catch return;
+    }
+
+    const text = "#include \"headers/test.h\"\n#define LOCAL 1\n";
+    var defs1 = try extractDefines(allocator, text, tmp_dir, null);
+    defer defs1.deinit();
+
+    try std.testing.expect(defs1.lookup("CACHED_VAL") != null);
+    try std.testing.expectEqualStrings("1", defs1.lookup("CACHED_VAL").?.body);
+    try std.testing.expect(defs1.file_mtimes.items.len > 0);
+
+    // Modify the header file (change content)
+    // Sleep briefly to ensure mtime changes (filesystem granularity)
+    std.posix.nanosleep(0, 10_000_000); // 10ms
+    {
+        const f = std.fs.cwd().createFile(tmp_dir ++ "/headers/test.h", .{}) catch return;
+        defer f.close();
+        var buf: [256]u8 = undefined;
+        var w = f.writer(&buf);
+        w.interface.writeAll("#define CACHED_VAL 2\n") catch return;
+        w.interface.flush() catch return;
+    }
+
+    // Same includes text, but header mtime changed — cache should be invalidated
+    var defs2 = try extractDefines(allocator, text, tmp_dir, &defs1);
+    defer defs2.deinit();
+
+    // Should have re-read from disk and found the new value
+    try std.testing.expect(defs2.lookup("CACHED_VAL") != null);
+    try std.testing.expectEqualStrings("2", defs2.lookup("CACHED_VAL").?.body);
 }

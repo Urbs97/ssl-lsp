@@ -28,7 +28,9 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Check if cursor is on a #include directive → jump to the included file
     if (getIncludePath(doc.text, @intCast(pos.line))) |inc_path| {
-        const file_path = helpers.uriToPath(allocator, uri) catch uri;
+        const resolved = helpers.resolveUriToPath(allocator, uri);
+        defer resolved.deinit();
+        const file_path = resolved.path;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
         var path_buf: [std.fs.max_path_bytes]u8 = undefined;
         if (helpers.resolveIncludePath(&path_buf, include_dir, inc_path)) |full_path| {
@@ -117,7 +119,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Search #define macros
     if (doc.defines) |*defs| {
-        if (defs.lookup(word)) |def| {
+        if (defs.lookupCaseInsensitive(word)) |def| {
             const def_uri = if (def.file.len == 0)
                 uri
             else
@@ -141,30 +143,18 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 }
 
 /// Extract the #include path from a given line, if it is a #include "..." directive.
-fn getIncludePath(text: []const u8, line: u32) ?[]const u8 {
+fn getIncludePath(text: []const u8, target_line: u32) ?[]const u8 {
     var current_line: u32 = 0;
-    var line_start: usize = 0;
-    for (text, 0..) |ch, idx| {
-        if (current_line == line) {
-            line_start = idx;
-            break;
-        }
-        if (ch == '\n') current_line += 1;
-    } else {
-        // for-else: the else branch runs only if the loop completed without breaking
-        // (i.e., the target line is the last line with no trailing newline)
-        if (current_line != line) return null;
-        line_start = text.len;
+    var line_iter = std.mem.splitScalar(u8, text, '\n');
+    while (line_iter.next()) |raw_line| : (current_line += 1) {
+        if (current_line != target_line) continue;
+        const line_text = std.mem.trimLeft(u8, std.mem.trimRight(u8, raw_line, "\r"), " \t");
+        if (!std.mem.startsWith(u8, line_text, "#include")) return null;
+        const rest = std.mem.trimLeft(u8, line_text[8..], " \t");
+        if (rest.len == 0 or rest[0] != '"') return null;
+        const end_quote = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
+        return rest[1..end_quote];
     }
-
-    var line_end: usize = line_start;
-    while (line_end < text.len and text[line_end] != '\n') line_end += 1;
-
-    const line_text = std.mem.trimLeft(u8, text[line_start..line_end], " \t");
-    if (!std.mem.startsWith(u8, line_text, "#include")) return null;
-    const rest = std.mem.trimLeft(u8, line_text[8..], " \t");
-    if (rest.len == 0 or rest[0] != '"') return null;
-    const end_quote = std.mem.indexOfScalarPos(u8, rest, 1, '"') orelse return null;
-    return rest[1..end_quote];
+    return null;
 }
 

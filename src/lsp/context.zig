@@ -114,7 +114,9 @@ pub const Context = struct {
         }
 
         // Resolve the original file's directory for include file resolution
-        const file_path = helpers.uriToPath(allocator, uri) catch uri;
+        const resolved = helpers.resolveUriToPath(allocator, uri);
+        defer resolved.deinit();
+        const file_path = resolved.path;
         const include_dir = std.fs.path.dirname(file_path) orelse ".";
 
         // Run the parser using self.allocator so ParseResult outlives the arena

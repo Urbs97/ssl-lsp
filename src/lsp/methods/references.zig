@@ -151,7 +151,7 @@ pub fn handle(ctx: *Context, allocator: std.mem.Allocator, id: ?std.json.Value, 
 
     // Search #define macros
     if (doc.defines) |*defs| {
-        if (defs.lookup(word)) |def| {
+        if (defs.lookupCaseInsensitive(word)) |def| {
             if (include_declaration) {
                 const def_uri = if (def.file.len == 0)
                     uri
