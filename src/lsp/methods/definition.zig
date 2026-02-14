@@ -163,4 +163,3 @@ fn getIncludePath(text: []const u8, target_line: u32, cursor_col: u32) ?[]const 
     }
     return null;
 }
-
